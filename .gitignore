@@ -7,9 +7,14 @@ config.json
 # Local Translation Checkpoints, Catalogs & Runtime Databases
 data/*catalog*
 data/translation_checkpoint.json
-data/skyrim_tm.db
+data/*.db
 data/*.db-wal
 data/*.db-shm
+data/*.zip
+data/*.xz
+data/*.gz
+data/glossary_uk.json
+data/seed_tm_uk.json.gz
 *.db-wal
 *.db-shm
 data/backup_game_exe/

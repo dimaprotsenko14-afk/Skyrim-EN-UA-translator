@@ -41,8 +41,8 @@
 - **Google Translate API** та **Ollama (`Qwen2.5`):**  
   Нейронні рушії, що використовуються для перекладу нових користувацьких модифікацій із застосуванням глосарію ОПН/ТПН.
 
-> **Правове застереження (Legal Disclaimer):**  
-> У цьому репозиторії **не розповсюджуються** жодні захищені авторським правом бінарні ресурси гри Bethesda Softworks (`.esm`, `.bsa`, `.exe`, `.swf`) або сторонні модифікації. Інструмент працює виключно з локально встановленими файлами користувача, створюючи неруйнівний патч перекладу.
+> **Правове застереження (Legal Disclaimer & 100% Code-Only Distribution):**  
+> У цьому репозиторії **не розповсюджуються** жодні захищені авторським правом бінарні ресурси гри Bethesda Softworks (`.esm`, `.bsa`, `.exe`, `.swf`), готові бази даних перекладу чи сторонні модифікації. Інструмент є повністю відкритим кодом (Code-Only). Користувач самостійно завантажує українську локалізацію (еталон ОПН/ТПН) з Nexus Mods або Steam Workshop, після чого вбудований аналізатор (`core/tm_builder.py` або Крок 1 у GUI) за лічені секунди створює персональну локальну базу пам'яті перекладів `data/skyrim_tm.db` та глосарій `data/glossary_uk.json` на ПК користувача.
 
 ---
 
@@ -57,23 +57,26 @@ cd Skyrin-EN-UA-translator
 pip install requests lz4 tqdm
 ```
 
-При першому запуску інструмент автоматично розгортає локальну базу пам'яті перекладів `data/skyrim_tm.db` (SQLite WAL + FTS5) із компактного початкового архіву `data/seed_tm_uk.json.gz` та глосарію `data/glossary_uk.json`.
+### 2. Крок 1: Одноразова генерація локальної бази зі зразка (Reference Localization)
+Завантажте українську локалізацію гри (ОПН або ТПН) з [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition) чи Steam Workshop.
 
-### 2. Запуск графічного інтерфейсу (Desktop GUI)
-На Windows запустіть `START_TRANSLATOR_GUI.bat` або виконайте:
+**Через графічний інтерфейс (GUI):**
+Запустіть `START_TRANSLATOR_GUI.bat` (або `python skyrim_translator_gui.py`):
+1. У блоці **«Крок 1: Ініціалізація бази зі зразка перекладу»**:
+   - Оберіть шлях до англійської гри (`Skyrim Special Edition/Data`).
+   - Оберіть шлях до завантаженої папки українського перекладу (з файлами `Strings/*` або `.bsa`).
+   - Натисніть **«Проаналізувати еталон та створити локальну базу (skyrim_tm.db)»**.
+   - Програма автоматично співставить StringID, витягне канонічний глосарій `data/glossary_uk.json` та створить FTS5 SQLite базу.
 
+**Або через командний рядок (CLI):**
 ```bash
-python skyrim_translator_gui.py
+python main.py --build-db --en-source "C:/Games/Skyrim Special Edition/Data" --uk-reference "C:/Downloads/Skyrim_UA_OPN"
 ```
 
-У вікні програми ви можете:
-- Обрати окремий файл плагіна (`.esp`/`.esm`/`.esl`), файл MCM (`*_english.txt`), теку окремого мода або кореневу теку `mods/` у **Mod Organizer 2**.
-- Вказати вихідну теку патчу (за замовчуванням `./output/[UA] Skyrim Translation Patch`).
-- Налаштувати режим назв модів у MCM (`keep_english`, `bilingual`, `translate`), режим суворого білого списку (`Strict Crash-Proof Whitelist Mode`) та локальний LLM (`Ollama`).
-- Відстежувати швидкість перекладу (`strings/sec`), відсоток влучань у пам'ять перекладів (`TM Cache Hit Rate`) та відкрити згенерований словник `INDEX_DICTIONARY.html`.
-
-### 3. Використання через командний рядок (CLI)
-
+### 3. Переклад модифікацій (GUI & CLI)
+Після створення локальної бази ви можете перекладати будь-які моди:
+- **У GUI:** оберіть цільовий `.esp`/`.esm`/`.esl` або папку мода/MO2 у блоці **«Крок 2»** та натисніть **«▶ Start Translation»**.
+- **У CLI:**
 ```bash
 # Переклад окремого плагіна або теки мода:
 python main.py --target "./mods/MyMod/MyMod.esp" --output "./output/[UA] Skyrim Translation Patch"

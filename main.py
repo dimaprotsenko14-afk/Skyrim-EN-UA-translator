@@ -32,6 +32,7 @@ from core.mod_translator import ModTranslationRequest, translate_mod_target
 from core.modpack_scanner import scan_all_modpack_mods
 from core.scanner import run_directory_audit
 from core.sseat_inspector import run_sseat_inspection
+from core.tm_builder import TMBuildRequest, build_tm_from_reference
 from core.vanilla_deployer import (
     build_vanilla_uk_from_extracted_en,
     deploy_to_game,
@@ -109,7 +110,24 @@ def main() -> None:
     parser.add_argument(
         "--build-db",
         action="store_true",
-        help="Audit directories, extract BSAs, and build skyrim_tm.db + glossary_uk.json",
+        help="Build local skyrim_tm.db and glossary_uk.json from reference localization",
+    )
+    parser.add_argument(
+        "--en-source",
+        type=str,
+        default=None,
+        help="Path to English source directory (e.g. Skyrim Special Edition/Data)",
+    )
+    parser.add_argument(
+        "--uk-reference",
+        type=str,
+        default=None,
+        help="Path to downloaded Ukrainian reference mod folder (e.g. OPN/TPN from Nexus/Steam)",
+    )
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="Recreate database from scratch during build-db",
     )
     parser.add_argument(
         "--setup-llm",
@@ -227,6 +245,35 @@ def main() -> None:
         return
 
     if args.build_db:
+        if args.en_source and args.uk_reference:
+            req = TMBuildRequest(
+                en_source_path=Path(args.en_source),
+                uk_reference_path=Path(args.uk_reference),
+                reset_db=args.reset_db,
+            )
+            print("=" * 72)
+            print("[BUILD-DB] Building Translation Memory from Reference Mod...")
+            print(f"  * EN Source     : {req.en_source_path}")
+            print(f"  * UK Reference  : {req.uk_reference_path}")
+            res = build_tm_from_reference(
+                req, progress_callback=lambda msg, pct: print(f"[{pct:5.1f}%] {msg}")
+            )
+            print("=" * 72)
+            print(f"[SUCCESS] Database Built Successfully!")
+            print(f"  * String Table Pairs : {res.strings_pairs_count:,}")
+            print(f"  * Plugin Pairs       : {res.plugin_pairs_count:,}")
+            print(f"  * MCM UI Pairs       : {res.mcm_pairs_count:,}")
+            print(f"  * Total TM Rows      : {res.total_tm_rows:,}")
+            print(f"  * Glossary Terms     : {res.glossary_terms_count:,}")
+            print(f"  * Database Path      : {res.db_path}")
+            print(f"  * Glossary Path      : {res.glossary_path}")
+            print(f"  * Elapsed Time       : {res.elapsed_sec}s")
+            print("=" * 72)
+            return
+        elif args.en_source or args.uk_reference:
+            print("[ERROR] Both --en-source and --uk-reference must be provided to build from reference.")
+            return
+
         run_directory_audit(save_json=True)
         run_sseat_inspection(save_report=True)
         extract_all_english_from_bsas()

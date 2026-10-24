@@ -27,6 +27,7 @@ from core.config import (
     load_config_model,
     save_config_model,
 )
+from core.database import DB_PATH, GLOSSARY_PATH, SkyrimTranslationDB
 from core.dictionary_exporter import INDEX_PATH, generate_master_index
 from core.mod_translator import (
     ModTranslationRequest,
@@ -34,6 +35,7 @@ from core.mod_translator import (
     translate_mod_target,
 )
 from core.modpack_scanner import scan_all_modpack_mods
+from core.tm_builder import TMBuildRequest, TMBuildResult, build_tm_from_reference
 
 
 BG_DARK = "#12141a"
@@ -137,6 +139,9 @@ class SkyrimTranslatorApp:
         self.stop_requested = False
 
         # Tkinter reactive variables
+        self.en_source_var = tk.StringVar(value="")
+        self.uk_ref_var = tk.StringVar(value="")
+        self.db_status_var = tk.StringVar(value="Перевірка бази...")
         self.target_path_var = tk.StringVar(value=self.cfg.mo2_mods_dir)
         self.output_patch_var = tk.StringVar(value=self.cfg.output_patch_dir)
         self.mcm_mode_var = tk.StringVar(value=self.cfg.mcm_title_mode)
@@ -149,6 +154,7 @@ class SkyrimTranslatorApp:
         self.status_var = tk.StringVar(value="Ready.")
 
         self._build_layout()
+        self._refresh_db_status()
         self._setup_sigint()
         self.root.after(100, self._poll_queue)
 
@@ -179,13 +185,77 @@ class SkyrimTranslatorApp:
         )
         header_lbl.pack(anchor=tk.W, pady=(0, 12))
 
-        # Path Selectors Card
+        # Reference Mod & DB Builder Card (Step 1)
+        ref_card = ttk.Frame(container, style="Card.TFrame", padding=14)
+        ref_card.pack(fill=tk.X, pady=(0, 12))
+
+        ttk.Label(
+            ref_card,
+            text="Крок 1: Ініціалізація бази зі зразка перекладу (Reference Mod)",
+            style="SubHeader.TLabel",
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
+
+        ttk.Label(
+            ref_card,
+            text="Оригінальна гра / Англійські файли (Data):",
+            style="Card.TLabel",
+        ).grid(row=1, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+
+        en_entry = tk.Entry(
+            ref_card,
+            textvariable=self.en_source_var,
+            bg=BG_INPUT,
+            fg=FG_TEXT,
+            insertbackground=FG_TEXT,
+            relief="flat",
+            font=("Consolas", 10),
+        )
+        en_entry.grid(row=1, column=1, sticky=tk.EW, padx=4, pady=4, ipady=4)
+        ttk.Button(ref_card, text="Browse Data", command=self._browse_en_source).grid(
+            row=1, column=2, padx=4, pady=4
+        )
+
+        ttk.Label(
+            ref_card,
+            text="Український переклад-еталон (папка з Nexus/Steam):",
+            style="Card.TLabel",
+        ).grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+
+        uk_entry = tk.Entry(
+            ref_card,
+            textvariable=self.uk_ref_var,
+            bg=BG_INPUT,
+            fg=FG_TEXT,
+            insertbackground=FG_TEXT,
+            relief="flat",
+            font=("Consolas", 10),
+        )
+        uk_entry.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=4, ipady=4)
+        ttk.Button(ref_card, text="Browse Reference", command=self._browse_uk_reference).grid(
+            row=2, column=2, padx=4, pady=4
+        )
+
+        ref_btn_row = ttk.Frame(ref_card, style="Card.TFrame")
+        ref_btn_row.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=(6, 0))
+
+        self.build_db_btn = ttk.Button(
+            ref_btn_row,
+            text="⚡ Проаналізувати еталон та створити локальну базу (skyrim_tm.db)",
+            style="Accent.TButton",
+            command=self._start_build_db,
+        )
+        self.build_db_btn.pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Label(ref_btn_row, textvariable=self.db_status_var, style="Metric.TLabel").pack(side=tk.LEFT)
+        ref_card.columnconfigure(1, weight=1)
+
+        # Path Selectors Card (Step 2)
         paths_card = ttk.Frame(container, style="Card.TFrame", padding=14)
         paths_card.pack(fill=tk.X, pady=(0, 12))
 
         ttk.Label(
             paths_card,
-            text="1. Вибір цільового моду, плагіна (.esp/.esm/.esl) або теки Mod Organizer 2",
+            text="Крок 2: Вибір цільового моду, плагіна (.esp/.esm/.esl) або теки Mod Organizer 2",
             style="SubHeader.TLabel",
         ).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 8))
 
@@ -228,11 +298,11 @@ class SkyrimTranslatorApp:
         )
         paths_card.columnconfigure(1, weight=1)
 
-        # Options & Checkboxes Card
+        # Options & Checkboxes Card (Step 3)
         opts_card = ttk.Frame(container, style="Card.TFrame", padding=14)
         opts_card.pack(fill=tk.X, pady=(0, 12))
 
-        ttk.Label(opts_card, text="2. Параметри безпеки та перекладу", style="SubHeader.TLabel").grid(
+        ttk.Label(opts_card, text="Крок 3: Параметри безпеки та перекладу", style="SubHeader.TLabel").grid(
             row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8)
         )
 
@@ -325,7 +395,7 @@ class SkyrimTranslatorApp:
         log_card = ttk.Frame(container, style="Card.TFrame", padding=12)
         log_card.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(log_card, text="3. Консоль виконання (Live Translation Log)", style="SubHeader.TLabel").pack(
+        ttk.Label(log_card, text="Крок 4: Консоль виконання (Live Translation Log)", style="SubHeader.TLabel").pack(
             anchor=tk.W, pady=(0, 6)
         )
 
@@ -346,6 +416,91 @@ class SkyrimTranslatorApp:
 
         self._append_log("Skyrim SE/AE EN -> UA Mod Translator initialized.")
         self._append_log("Select a plugin (.esp/.esm/.esl), MCM file, Mod Folder, or MO2 mods directory to begin.")
+
+    def _refresh_db_status(self) -> None:
+        try:
+            if DB_PATH.exists():
+                db = SkyrimTranslationDB(DB_PATH)
+                summary = db.get_summary_counts()
+                db.close()
+                total = summary.get("total_rows", 0)
+                if total > 0:
+                    self.db_status_var.set(f"Локальна база готова: {total:,} пар у skyrim_tm.db")
+                    return
+            self.db_status_var.set("Локальна база не створена. Вкажіть шляхи вище та натисніть 'Проаналізувати еталон'")
+        except Exception:
+            self.db_status_var.set("Помилка читання skyrim_tm.db")
+
+    def _browse_en_source(self) -> None:
+        chosen = filedialog.askdirectory(title="Оберіть теку гри або англійських файлів (Skyrim Special Edition/Data)")
+        if chosen:
+            self.en_source_var.set(chosen)
+
+    def _browse_uk_reference(self) -> None:
+        chosen = filedialog.askdirectory(title="Оберіть папку українського перекладу-еталона (ОПН/ТПН з Nexus/Steam)")
+        if chosen:
+            self.uk_ref_var.set(chosen)
+
+    def _start_build_db(self) -> None:
+        if self.is_running:
+            return
+        en_str = self.en_source_var.get().strip()
+        uk_str = self.uk_ref_var.get().strip()
+        if not en_str or not uk_str:
+            messagebox.showwarning(
+                "Необхідно вказати обидва шляхи",
+                "Будь ласка, оберіть шлях до англійських файлів (Skyrim Special Edition/Data)\n"
+                "та шлях до завантаженого українського перекладу-еталона (ОПН/ТПН).",
+            )
+            return
+
+        en_path = Path(en_str)
+        uk_path = Path(uk_str)
+        if not en_path.exists():
+            messagebox.showerror("Помилка шляху", f"Шлях до англійських файлів не існує:\n{en_path}")
+            return
+        if not uk_path.exists():
+            messagebox.showerror("Помилка шляху", f"Шлях до перекладу-еталона не існує:\n{uk_path}")
+            return
+
+        self.is_running = True
+        self.build_db_btn.configure(state=tk.DISABLED)
+        self.start_btn.configure(state=tk.DISABLED)
+        self.batch_btn.configure(state=tk.DISABLED)
+        self.progress_var.set(2.0)
+        self.status_var.set("Аналіз перекладу-еталона...")
+
+        req = TMBuildRequest(
+            en_source_path=en_path,
+            uk_reference_path=uk_path,
+            reset_db=False,
+        )
+        threading.Thread(target=self._worker_build_db, args=(req,), daemon=True).start()
+
+    def _worker_build_db(self, req: TMBuildRequest) -> None:
+        self.log_queue.put({"type": "log", "text": f"Початок аналізу еталона: {req.uk_reference_path}"})
+        try:
+            def _prog(msg: str, pct: float) -> None:
+                self.log_queue.put({"type": "log", "text": msg})
+                self.log_queue.put({"type": "progress", "status": msg, "pct": pct})
+
+            res = build_tm_from_reference(req, progress_callback=_prog)
+            self.log_queue.put({
+                "type": "log",
+                "text": (
+                    f"[УСПІХ] Базу skyrim_tm.db успішно створено: {res.total_tm_rows:,} пар, "
+                    f"{res.glossary_terms_count:,} термінів глосарію ({res.elapsed_sec}s)."
+                ),
+            })
+            self.log_queue.put({
+                "type": "progress",
+                "status": f"База створена ({res.total_tm_rows:,} пар)",
+                "pct": 100.0,
+            })
+        except Exception as exc:
+            self.log_queue.put({"type": "log", "text": f"[ПОМИЛКА] {exc}"})
+        finally:
+            self.log_queue.put({"type": "done_build_db"})
 
     def _on_mcm_checkbox_toggle(self) -> None:
         if self.keep_mcm_en_var.get():
@@ -423,8 +578,16 @@ class SkyrimTranslatorApp:
                 self.is_running = False
                 self.start_btn.configure(state=tk.NORMAL)
                 self.batch_btn.configure(state=tk.NORMAL)
+                self.build_db_btn.configure(state=tk.NORMAL)
                 self.progress_var.set(100.0)
                 self.status_var.set("Translation Complete.")
+            elif kind == "done_build_db":
+                self.is_running = False
+                self.start_btn.configure(state=tk.NORMAL)
+                self.batch_btn.configure(state=tk.NORMAL)
+                self.build_db_btn.configure(state=tk.NORMAL)
+                self._refresh_db_status()
+                messagebox.showinfo("Готово", "Локальну базу перекладів skyrim_tm.db успішно сформовано!")
         self.root.after(100, self._poll_queue)
 
     def _start_translation(self) -> None:
