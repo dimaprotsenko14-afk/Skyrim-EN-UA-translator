@@ -1,0 +1,63 @@
+# Local User Configuration & Secrets
+config.json
+.env
+*.key
+*.pem
+
+# Local Translation Checkpoints, Catalogs & Runtime Databases
+data/*catalog*
+data/translation_checkpoint.json
+data/skyrim_tm.db
+data/*.db-wal
+data/*.db-shm
+*.db-wal
+*.db-shm
+data/backup_game_exe/
+data/dictionary_rows/
+data/extracted_en/
+data/*gameroot*
+data/*manifest*.json
+data/directory_audit.json
+data/phase*_report.json
+data/sseat_audit_report.json
+data/*.md
+
+# Generated Outputs, Staging & Logs
+translated_mods/
+staged/
+staged_translations/
+build_vanilla_uk/
+output/
+logs/
+scratch/
+test_saves/
+reference/
+tools/
+*.log
+*.png
+*.jpg
+*.bak
+
+# Creation Engine & Mod Binaries (Never distribute copyrighted assets)
+*.esp
+*.esm
+*.esl
+*.bsa
+*.ba2
+*.pex
+*.dll
+*.exe
+*.swf
+*.ess
+*.skse
+
+# Python Bytecode & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

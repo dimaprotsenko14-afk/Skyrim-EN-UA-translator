@@ -1,0 +1,18 @@
+{
+  "game_data_dir": "./game_data",
+  "mo2_mods_dir": "./mods",
+  "mo2_profile_dir": "./profiles/Default",
+  "output_patch_dir": "./output/[UA] Skyrim Translation Patch",
+  "reference_dir": "./reference",
+  "sseat_dir": "./tools/sseat",
+  "mcm_title_mode": "keep_english",
+  "strict_whitelist_mode": true,
+  "use_local_ollama": false,
+  "ollama_url": "http://localhost:11434",
+  "ollama_model": "qwen2.5:3b",
+  "neural_timeout_sec": 8.0,
+  "circuit_breaker_failures": 5,
+  "circuit_breaker_cooldown_sec": 30.0,
+  "batch_size": 35,
+  "max_workers": 8
+}
