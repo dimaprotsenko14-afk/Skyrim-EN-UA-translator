@@ -1,4 +1,4 @@
-# Skyrim SE/AE Universal English-to-Ukrainian Mod Translator (`Skyrin-EN-UA-translator`)
+# Skyrim SE/AE Universal English-to-Ukrainian Mod Translator (`Skyrim-EN-UA-translator`)
 
 Універсальний бінарний інструмент з відкритим кодом (GUI та CLI) для автоматизованого та безпечного перекладу модифікацій **The Elder Scrolls V: Skyrim Special Edition / Anniversary Edition (1.6.1170+)** українською мовою за стандартами канонічної термінології **ОПН** (Офіційний переклад назв) та **ТПН** (Традиційний переклад назв).
 
