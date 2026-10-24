@@ -101,7 +101,7 @@ STRICT_TOP_LEVEL_GRUP_PASSTHROUGH = {
 
 ## 5. Авторські права та Подяки (Attribution)
 
-- **Спільнота українських локалізаторів Skyrim SE/AE (автори ОПН та ТПН на Nexus Mods та Steam Workshop):** за створення взірцевого українського перекладу базової гри, DLC та Creation Club і формування канонічного глосарію термінів Всесвіту Сувоїв.
+- **Спільнота українських локалізаторів Skyrim SE/AE (автори ОПН та ТПН на Nexus Mods та Steam Workshop):** за створення взірцевого українського перекладу базової гри, DLC та Creation Club і формування канонічного глосарію термінів Всесвіту Сувоїв. https://www.nexusmods.com/skyrimspecialedition/mods/35733
 - **SSE Auto Translator (SSE-AT):** за структуру правил `string_records.json` та мапінг типів записів.
 - **xTranslator & SSEEdit / xEdit Team:** за документацію бінарних структур плагінів Bethesda Creation Engine.
 - **Google Translate API & Ollama (`Qwen2.5`):** за нейронні моделі перекладу.
