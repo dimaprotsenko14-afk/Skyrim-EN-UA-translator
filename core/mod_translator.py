@@ -1,4 +1,4 @@
-﻿"""
+"""
 Universal Skyrim SE/AE Mod & Plugin Translator (core/mod_translator.py).
 Translates standalone .esp/.esm/.esl plugins, Interface/Translations/*_english.txt MCM files,
 SKSE/Plugins/MCM/Config/*/config.json (MCM Helper JSONs), Strings/*.*strings tables, and
@@ -355,6 +355,42 @@ def translate_mod_plugin(
             seen_en.add(txt)
             unique_en.append(txt)
 
+    if not unique_en:
+        # Zero safe translatable records (e.g. blacklisted HDPT-only mods like SGEyebrows - Improved.esp).
+        # Do NOT write or copy an unmodified .esp into translated_mods/ or patch_dir.
+        if target_path.exists():
+            try:
+                target_path.unlink()
+            except OSError:
+                pass
+        out_backup_dir = (TRANSLATED_MODS_DIR / mod_folder_name).resolve()
+        out_backup_esp = out_backup_dir / source_esp_path.name
+        if out_backup_esp.exists():
+            try:
+                out_backup_esp.unlink()
+            except OSError:
+                pass
+        return {
+            "mod_name": mod_folder_name,
+            "plugin_name": source_esp_path.name,
+            "masters": parsed.get("masters", []),
+            "total_records": len(records),
+            "unique_strings": 0,
+            "tm_exact_hits": 0,
+            "tm_variant_hits": 0,
+            "neural_translated": 0,
+            "modified_records": 0,
+            "original_size_bytes": Path(source_esp_path).stat().st_size,
+            "rebuilt_size_bytes": 0,
+            "structural_integrity_verified": True,
+            "mo2_patch_path": "",
+            "backup_path": "",
+            "exported_reports": {"html_path": "", "all_html_paths": []},
+            "spawner_batch": {"data_batch_path": "", "total_spawn_commands": 0, "items_count": 0, "spells_count": 0},
+            "elapsed_sec": round(time.perf_counter() - t0, 2),
+            "sample_translations": [],
+        }
+
     batch_res = translator.translate_batch_deduplicated(
         strings=unique_en,
         module_name=mod_folder_name,
@@ -391,8 +427,6 @@ def translate_mod_plugin(
     out_backup_dir = (TRANSLATED_MODS_DIR / mod_folder_name).resolve()
     ensure_safe_output_path(out_backup_dir, TRANSLATED_MODS_DIR.resolve())
     out_backup_dir.mkdir(parents=True, exist_ok=True)
-    if output_root != out_backup_dir:
-        _ensure_mo2_patch_meta_ini(output_root)
     out_backup_esp = out_backup_dir / source_esp_path.name
 
     rebuild_stats = rebuild_plugin_file(
@@ -401,6 +435,38 @@ def translate_mod_plugin(
         translation_fn=_translate_record_cb,
         skip_npc=skip_npc,
     )
+
+    if rebuild_stats.get("modified_records", 0) <= 0:
+        # Zero modified records -> delete unmodified plugin copy so it never pollutes translated_mods/ or patch_dir
+        for p in (target_path, out_backup_esp):
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        return {
+            "mod_name": mod_folder_name,
+            "plugin_name": source_esp_path.name,
+            "masters": parsed.get("masters", []),
+            "total_records": len(records),
+            "unique_strings": len(unique_en),
+            "tm_exact_hits": tm_hits,
+            "tm_variant_hits": variant_tm_hits,
+            "neural_translated": neural_count,
+            "modified_records": 0,
+            "original_size_bytes": rebuild_stats["original_size"],
+            "rebuilt_size_bytes": 0,
+            "structural_integrity_verified": True,
+            "mo2_patch_path": "",
+            "backup_path": "",
+            "exported_reports": {"html_path": "", "all_html_paths": []},
+            "spawner_batch": {"data_batch_path": "", "total_spawn_commands": 0, "items_count": 0, "spells_count": 0},
+            "elapsed_sec": round(time.perf_counter() - t0, 2),
+            "sample_translations": [],
+        }
+
+    if output_root != out_backup_dir:
+        _ensure_mo2_patch_meta_ini(output_root)
     if target_path.resolve() != out_backup_esp.resolve():
         shutil.copy2(target_path, out_backup_esp)
 
@@ -666,7 +732,8 @@ def translate_mod_target(
                     title_mode=request.mcm_title_mode,
                     skip_npc=request.strict_whitelist_mode,
                 )
-                result.plugins_rebuilt = 1
+                if info.get("modified_records", 0) > 0:
+                    result.plugins_rebuilt = 1
                 result.total_strings = info["unique_strings"]
                 result.tm_hits = info["tm_exact_hits"] + info["tm_variant_hits"]
                 result.neural_translated = info["neural_translated"]
@@ -717,11 +784,12 @@ def translate_mod_target(
                     title_mode=request.mcm_title_mode,
                     skip_npc=request.strict_whitelist_mode,
                 )
-                result.plugins_rebuilt += 1
+                if info.get("modified_records", 0) > 0:
+                    result.plugins_rebuilt += 1
+                    result.html_dictionary_path = info["exported_reports"]["html_path"]
                 result.total_strings += info["unique_strings"]
                 result.tm_hits += info["tm_exact_hits"] + info["tm_variant_hits"]
                 result.neural_translated += info["neural_translated"]
-                result.html_dictionary_path = info["exported_reports"]["html_path"]
                 result.details.append(info)
 
             for mfile in loose_mcms:
@@ -888,6 +956,22 @@ def translate_mod_target(
                             section=fname,
                         )
                         result.html_dictionary_path = exp["html_path"]
+
+        if (
+            result.plugins_rebuilt == 0
+            and result.mcm_files_translated == 0
+            and result.strings_tables_translated == 0
+        ):
+            # Clean up empty or zero-delta mod folder in translated_mods/ so untranslated mods do not linger
+            mod_out = (TRANSLATED_MODS_DIR / _safe_folder_name(resolved_mod_name)).resolve()
+            if mod_out.is_dir() and mod_out != TRANSLATED_MODS_DIR.resolve():
+                shutil.rmtree(mod_out, ignore_errors=True)
+            reg_json = DATA_DIR / "dictionary_rows" / f"{_safe_folder_name(resolved_mod_name)}.json"
+            if reg_json.exists():
+                try:
+                    reg_json.unlink()
+                except OSError:
+                    pass
 
         idx_path = generate_master_index()
         if not result.html_dictionary_path:

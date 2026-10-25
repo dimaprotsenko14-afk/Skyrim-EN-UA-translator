@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.1
+### Fixed
+- **Zero-Delta Plugin Guard (`core/mod_translator.py` & `core/patch_builder.py`)**:
+  - Plugins that contain only blacklisted non-translatable records (such as `HDPT`-only appearance mods) or `0` modified safe records are no longer written into `translated_mods/` or copied into the final patch.
+  - Only plugins where `modified_records_count > 0` are retained and merged into `[UA] Skyrim Translation Patch`.
+
+### Added
+- **Auto-Named `[UA] Skyrim Translation Patch\` Subfolder & Ready `.zip` Archive (`core/patch_builder.py`)**:
+  - When building the unified patch into any user-selected directory, the builder automatically places all output files inside a clearly named `[UA] Skyrim Translation Patch\` subfolder and generates `[UA] Skyrim Translation Patch.zip` alongside it for 1-click Mod Organizer 2 / Vortex archive installation.
+- `VERSION = "1.1.1"`.
+
 ## v1.1.0
 ### Fixed
 - **Reference database builder (`core/tm_builder.py`)** produced an empty `skyrim_tm.db` for donor localizations:

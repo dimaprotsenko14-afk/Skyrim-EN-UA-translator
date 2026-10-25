@@ -239,8 +239,12 @@ def main() -> None:
         )
         print("=" * 72)
         print(f"[DONE] Unified patch: {res.patch_dir}")
+        if res.zip_path:
+            print(f"  * ZIP Archive : {res.zip_path}")
         print(f"  * Donor files : {res.donor_files:,}")
         print(f"  * Mod files   : {res.mod_files:,} ({len(res.mods_merged)} mods)")
+        if res.skipped_zero_delta_plugins:
+            print(f"  * Skipped 0-delta plugins: {', '.join(res.skipped_zero_delta_plugins)}")
         print(f"  * Total       : {res.total_files:,} {res.by_kind}")
         print("=" * 72)
         return

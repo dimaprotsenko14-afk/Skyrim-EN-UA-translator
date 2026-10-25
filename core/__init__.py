@@ -1,4 +1,4 @@
-﻿"""Core package for Skyrim SE/AE Mod Translator."""
+"""Core package for Skyrim SE/AE Mod Translator."""
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 

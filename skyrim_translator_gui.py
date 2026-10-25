@@ -1,4 +1,4 @@
-﻿"""
+"""
 Standalone Desktop Launcher for the Skyrim SE/AE English-to-Ukrainian Mod Translator (skyrim_translator_gui.py).
 
 Modern responsive dark dashboard built with `customtkinter` (pip install customtkinter):
@@ -359,6 +359,10 @@ class TranslatorApp:
 
     def _open_patch_folder(self) -> None:
         p = self._patch_dir()
+        named_sub = p / "[UA] Skyrim Translation Patch"
+        if named_sub.exists():
+            _open_path(named_sub)
+            return
         if not p.exists():
             messagebox.showinfo("Папка патча", f"Патч ще не створено:\n{p}")
             return
@@ -523,6 +527,7 @@ class TranslatorApp:
                 "text": (
                     f"[УСПІХ] Єдиний патч: {res.total_files:,} файлів "
                     f"(донор: {res.donor_files:,}, моди: {res.mod_files:,} з {len(res.mods_merged)}) → {res.patch_dir}"
+                    + (f" | Архів: {res.zip_path}" if res.zip_path else "")
                 ),
             })
 
