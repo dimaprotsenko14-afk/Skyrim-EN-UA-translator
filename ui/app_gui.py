@@ -1,6 +1,6 @@
-"""
+﻿"""
 UI Module Entry Point (ui/app_gui.py).
-Delegates to the standalone zero-dependency dark-themed Tkinter GUI (skyrim_translator_gui.py).
+Delegates to the standalone customtkinter dark dashboard GUI (skyrim_translator_gui.py).
 """
 
 from skyrim_translator_gui import SkyrimTranslatorApp, launch_gui

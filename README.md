@@ -54,7 +54,7 @@
 ```bash
 git clone https://github.com/dimaprotsenko14-afk/Skyrin-EN-UA-translator.git
 cd Skyrin-EN-UA-translator
-pip install requests lz4 tqdm
+pip install -r requirements.txt   # requests, lz4, tqdm, customtkinter
 ```
 
 ### 2. Крок 1: Одноразова генерація локальної бази зі зразка (Reference Localization)
@@ -73,9 +73,12 @@ pip install requests lz4 tqdm
 python main.py --build-db --en-source "C:/Games/Skyrim Special Edition/Data" --uk-reference "C:/Downloads/Skyrim_UA_OPN"
 ```
 
+Англійський шлях можна залишити порожнім — інструмент сам знайде `Skyrim Special Edition\Data` (реєстр / Steam) і візьме англійські таблиці з `Data\Strings` або з офіційних `.bsa`. Потрібні лише таблиці `*_english.*` (мовні версії `german/russian/...` ігноруються).
+
 ### 3. Переклад модифікацій (GUI & CLI)
 Після створення локальної бази ви можете перекладати будь-які моди:
-- **У GUI:** оберіть цільовий `.esp`/`.esm`/`.esl` або папку мода/MO2 у блоці **«Крок 2»** та натисніть **«▶ Start Translation»**.
+- **У GUI (v1.1.0, повноекранна панель):** **Блок 2** — оберіть «Окремий мод» або «Модліст» і натисніть **«▶ Перекласти ціль»**. Результат кожного мода — у `translated_mods/<ModName>/` (корінь програми та папка патча не засмічуються).
+- **Єдиний патч для MO2 / Vortex:** кнопка **«📦 Створити єдиний патч…»** збирає `output/[UA] Skyrim Translation Patch`: базовий шар донора (`Strings`, `Interface`, `.esp`) + зверху перекладені моди.
 - **У CLI:**
 ```bash
 # Переклад окремого плагіна або теки мода:
@@ -86,6 +89,12 @@ python main.py --scan-mods "./mods"
 
 # Пакетний переклад усіх хвиль (Wave 1..4) із синхронізацією в MO2:
 python main.py --batch-wave all
+
+# Переклад усіх модів із теки модліста (результат -> translated_mods/<ModName>/):
+python main.py --translate-modlist "./mods"
+
+# Єдиний патч (перекладені моди + донор); --no-donor вимикає шар донора:
+python main.py --build-patch --donor "C:/Downloads/Skyrim_UA_OPN"
 
 # Перевірка статусу бази даних та контрольних точок:
 python main.py --status

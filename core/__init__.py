@@ -1,1 +1,4 @@
-"""Core package for Skyrim SE/AE Mod Translator (Phase 1)."""
+﻿"""Core package for Skyrim SE/AE Mod Translator."""
+
+VERSION = "1.1.0"
+

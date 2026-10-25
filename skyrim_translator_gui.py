@@ -1,42 +1,57 @@
-"""
-Standalone Universal Desktop GUI for Skyrim SE/AE English-to-Ukrainian Mod Translator
-(skyrim_translator_gui.py).
+﻿"""
+Standalone Desktop Launcher for the Skyrim SE/AE English-to-Ukrainian Mod Translator (skyrim_translator_gui.py).
 
-Uses standard library `tkinter` / `ttk` (zero external binary GUI dependencies) with a modern
-dark-themed interface, RORO configuration models, live progress metrics (strings/sec, TM hit rate),
-and direct access to the interactive HTML Dictionary (`INDEX_DICTIONARY.html`).
+Modern responsive dark dashboard built with `customtkinter` (pip install customtkinter):
+  * Header: title, version badge, live local-database status, quick actions.
+  * Left column: reference donor import (builds skyrim_tm.db) and translation target (single mod / modlist).
+  * Right column: safety options and the unified MO2 / Vortex patch builder (modlist + donor merge).
+  * Bottom: live log with progress bar, strings/sec and TM hit rate.
 """
 
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
+from tkinter import filedialog, messagebox
 from typing import Any, Dict, Optional
 
-from core.batch_orchestrator import ModpackBatchOrchestrator, ensure_mo2_patch_meta_ini
+try:
+    import customtkinter as ctk
+except ImportError:  # pragma: no cover - friendly message instead of a traceback
+    sys.stderr.write(
+        "customtkinter is required for the GUI.\n"
+        "Install it with:  py -m pip install customtkinter\n"
+        "(the CLI `py main.py --help` works without it)\n"
+    )
+    raise SystemExit(1)
+
 from core.checkpoint_manager import CheckpointManager
 from core.config import (
     PROJECT_ROOT,
     TranslatorConfig,
+    get_translated_mods_dir,
     load_config_model,
+    resolve_portable_path,
+    sanitize_output_patch_dir,
     save_config_model,
 )
 from core.database import DB_PATH, GLOSSARY_PATH, SkyrimTranslationDB
-from core.dictionary_exporter import INDEX_PATH, generate_master_index
+from core.dictionary_exporter import generate_master_index
 from core.mod_translator import (
     ModTranslationRequest,
     ModTranslationResult,
     translate_mod_target,
+    translate_modlist,
 )
-from core.modpack_scanner import scan_all_modpack_mods
-from core.tm_builder import TMBuildRequest, TMBuildResult, build_tm_from_reference
+from core.patch_builder import PatchBuildRequest, build_unified_mo2_patch
+from core.tm_builder import TMBuildRequest, build_tm_from_reference
 
+VERSION = "1.1.0"
 
 BG_DARK = "#12141a"
 BG_PANEL = "#1b1e27"
@@ -44,122 +59,254 @@ BG_INPUT = "#101218"
 FG_TEXT = "#e8ecf4"
 FG_MUTED = "#9aa3b5"
 ACCENT_GOLD = "#e2b86b"
+ACCENT_GOLD_HOVER = "#f0c97d"
 ACCENT_GREEN = "#7ce3a3"
 BORDER_COLOR = "#2c3140"
 
+MODE_SINGLE = "Окремий мод"
+MODE_MODLIST = "Модліст"
 
-def apply_dark_theme(root: tk.Tk) -> ttk.Style:
-    """Configure a modern dark theme for ttk widgets."""
-    root.configure(bg=BG_DARK)
-    style = ttk.Style(root)
+
+def _open_path(path: Path) -> None:
+    """Open a file/folder with the OS default handler (no shell involved)."""
     try:
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
-
-    style.configure(".", background=BG_DARK, foreground=FG_TEXT, font=("Segoe UI", 10))
-    style.configure("TFrame", background=BG_DARK)
-    style.configure("Card.TFrame", background=BG_PANEL, relief="flat")
-    style.configure("TLabel", background=BG_DARK, foreground=FG_TEXT, font=("Segoe UI", 10))
-    style.configure("Card.TLabel", background=BG_PANEL, foreground=FG_TEXT, font=("Segoe UI", 10))
-    style.configure("Header.TLabel", background=BG_DARK, foreground=ACCENT_GOLD, font=("Segoe UI", 15, "bold"))
-    style.configure("SubHeader.TLabel", background=BG_PANEL, foreground=ACCENT_GOLD, font=("Segoe UI", 11, "bold"))
-    style.configure("Muted.TLabel", background=BG_PANEL, foreground=FG_MUTED, font=("Segoe UI", 9))
-    style.configure("Metric.TLabel", background=BG_PANEL, foreground=ACCENT_GREEN, font=("Consolas", 11, "bold"))
-
-    style.configure(
-        "TButton",
-        background="#232734",
-        foreground=FG_TEXT,
-        bordercolor=BORDER_COLOR,
-        padding=(12, 6),
-        font=("Segoe UI", 10, "bold"),
-    )
-    style.map(
-        "TButton",
-        background=[("active", ACCENT_GOLD), ("disabled", "#181a22")],
-        foreground=[("active", BG_DARK), ("disabled", FG_MUTED)],
-    )
-
-    style.configure(
-        "Accent.TButton",
-        background=ACCENT_GOLD,
-        foreground=BG_DARK,
-        bordercolor=ACCENT_GOLD,
-        padding=(16, 8),
-        font=("Segoe UI", 10, "bold"),
-    )
-    style.map(
-        "Accent.TButton",
-        background=[("active", "#f0c97d"), ("disabled", "#3a3f50")],
-        foreground=[("active", BG_DARK), ("disabled", FG_MUTED)],
-    )
-
-    style.configure(
-        "TCheckbutton",
-        background=BG_PANEL,
-        foreground=FG_TEXT,
-        font=("Segoe UI", 10),
-    )
-    style.map("TCheckbutton", background=[("active", BG_PANEL)])
-
-    style.configure(
-        "TCombobox",
-        fieldbackground=BG_INPUT,
-        background="#232734",
-        foreground=FG_TEXT,
-        arrowcolor=ACCENT_GOLD,
-    )
-
-    style.configure(
-        "Horizontal.TProgressbar",
-        troughcolor=BG_INPUT,
-        background=ACCENT_GOLD,
-        bordercolor=BORDER_COLOR,
-        lightcolor=ACCENT_GOLD,
-        darkcolor=ACCENT_GOLD,
-        thickness=18,
-    )
-    return style
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except OSError as exc:
+        messagebox.showerror("Помилка", f"Не вдалося відкрити:\n{path}\n{exc}")
 
 
-class SkyrimTranslatorApp:
-    """Universal GUI Controller for Skyrim SE/AE English -> Ukrainian Mod Translation."""
-
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Skyrim SE/AE EN -> UA Mod Translator (OPN / TPN Standard)")
-        self.root.geometry("980x720")
-        self.root.minsize(860, 640)
-        apply_dark_theme(self.root)
+class TranslatorApp:
+    def __init__(self) -> None:
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("dark-blue")
+        self.root = ctk.CTk(fg_color=BG_DARK)
+        self.root.title(f"Skyrim SE/AE — Український локалізатор модів v{VERSION}")
+        self.root.geometry("1280x820")
+        self.root.minsize(1100, 720)
+        try:
+            self.root.after(50, lambda: self.root.state("zoomed"))  # launch maximized (Windows)
+        except Exception:
+            pass
 
         self.cfg: TranslatorConfig = load_config_model()
         self.log_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.is_running = False
         self.stop_requested = False
 
-        # Tkinter reactive variables
-        self.en_source_var = tk.StringVar(value="")
-        self.uk_ref_var = tk.StringVar(value="")
-        self.db_status_var = tk.StringVar(value="Перевірка бази...")
-        self.target_path_var = tk.StringVar(value=self.cfg.mo2_mods_dir)
-        self.output_patch_var = tk.StringVar(value=self.cfg.output_patch_dir)
-        self.mcm_mode_var = tk.StringVar(value=self.cfg.mcm_title_mode)
-        self.keep_mcm_en_var = tk.BooleanVar(value=(self.cfg.mcm_title_mode == "keep_english"))
-        self.strict_whitelist_var = tk.BooleanVar(value=self.cfg.strict_whitelist_mode)
-        self.use_ollama_var = tk.BooleanVar(value=self.cfg.use_local_ollama)
-        self.progress_var = tk.DoubleVar(value=0.0)
-        self.speed_var = tk.StringVar(value="Speed: 0.0 strings/sec")
-        self.tm_rate_var = tk.StringVar(value="TM Cache Hit Rate: 0.0%")
-        self.status_var = tk.StringVar(value="Ready.")
+        ref_default = resolve_portable_path(self.cfg.reference_dir, "./reference")
+        self.en_source_var = ctk.StringVar(value=self.cfg.game_data_dir if Path(self.cfg.game_data_dir).is_absolute() else "")
+        self.uk_ref_var = ctk.StringVar(value=str(ref_default) if ref_default.exists() else "")
+        self.mode_var = ctk.StringVar(value=MODE_MODLIST)
+        self.target_path_var = ctk.StringVar(value=self.cfg.mo2_mods_dir if Path(self.cfg.mo2_mods_dir).is_absolute() else "")
+        self.output_patch_var = ctk.StringVar(value=sanitize_output_patch_dir(self.cfg.output_patch_dir))
+        self.keep_mcm_en_var = ctk.BooleanVar(value=self.cfg.mcm_title_mode == "keep_english")
+        self.strict_whitelist_var = ctk.BooleanVar(value=self.cfg.strict_whitelist_mode)
+        self.use_ollama_var = ctk.BooleanVar(value=self.cfg.use_local_ollama)
+        self.include_donor_var = ctk.BooleanVar(value=True)
+        self.db_badge_var = ctk.StringVar(value="База TM: … | Глосарій: …")
+        self.status_var = ctk.StringVar(value="Готово до роботи.")
+        self.speed_var = ctk.StringVar(value="Рядків/сек: 0.0")
+        self.tm_rate_var = ctk.StringVar(value="TM Hit Rate: 0.0%")
 
+        self._action_buttons: list = []
         self._build_layout()
         self._refresh_db_status()
         self._setup_sigint()
         self.root.after(100, self._poll_queue)
 
+    # ------------------------------------------------------------------ layout helpers
+    def _card(self, parent: Any, title: str) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(parent, fg_color=BG_PANEL, corner_radius=12, border_width=1, border_color=BORDER_COLOR)
+        card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            card, text=title, text_color=ACCENT_GOLD, font=ctk.CTkFont("Segoe UI", 15, "bold"), anchor="w"
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        return card
+
+    def _path_row(self, card: Any, row: int, label: str, var: ctk.StringVar, browse_cmd: Any, btn_text: str = "Огляд…") -> None:
+        ctk.CTkLabel(card, text=label, text_color=FG_MUTED, anchor="w", font=ctk.CTkFont("Segoe UI", 12)).grid(
+            row=row, column=0, sticky="ew", padx=16, pady=(4, 0)
+        )
+        line = ctk.CTkFrame(card, fg_color="transparent")
+        line.grid(row=row + 1, column=0, sticky="ew", padx=16, pady=(2, 6))
+        line.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(
+            line, textvariable=var, fg_color=BG_INPUT, border_color=BORDER_COLOR, text_color=FG_TEXT,
+            font=ctk.CTkFont("Consolas", 12), height=34,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            line, text=btn_text, width=96, height=34, fg_color="#232734", hover_color="#2e3447",
+            text_color=FG_TEXT, command=browse_cmd,
+        ).grid(row=0, column=1)
+
+    def _action_button(self, parent: Any, text: str, command: Any, primary: bool = False, **grid: Any) -> ctk.CTkButton:
+        btn = ctk.CTkButton(
+            parent, text=text, command=command, height=40,
+            fg_color=ACCENT_GOLD if primary else "#232734",
+            hover_color=ACCENT_GOLD_HOVER if primary else "#2e3447",
+            text_color=BG_DARK if primary else FG_TEXT,
+            font=ctk.CTkFont("Segoe UI", 13, "bold"),
+        )
+        btn.grid(**grid)
+        self._action_buttons.append(btn)
+        return btn
+
+    def _build_layout(self) -> None:
+        root = self.root
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(1, weight=1)
+
+        # ---- Header bar
+        header = ctk.CTkFrame(root, fg_color=BG_PANEL, corner_radius=0, height=64)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(2, weight=1)
+        ctk.CTkLabel(
+            header, text="Skyrim SE/AE — Український локалізатор модів (OPN / TPN)",
+            text_color=ACCENT_GOLD, font=ctk.CTkFont("Segoe UI", 20, "bold"),
+        ).grid(row=0, column=0, padx=(20, 10), pady=14)
+        ctk.CTkLabel(
+            header, text=f" v{VERSION} ", fg_color=ACCENT_GOLD, text_color=BG_DARK, corner_radius=8,
+            font=ctk.CTkFont("Segoe UI", 12, "bold"),
+        ).grid(row=0, column=1, padx=6)
+        ctk.CTkLabel(
+            header, textvariable=self.db_badge_var, text_color=ACCENT_GREEN, fg_color=BG_INPUT, corner_radius=8,
+            font=ctk.CTkFont("Consolas", 12, "bold"), padx=12, pady=4,
+        ).grid(row=0, column=2, padx=14, sticky="w")
+        ctk.CTkButton(
+            header, text="📖 Відкрити Словник HTML", width=190, fg_color="#232734", hover_color="#2e3447",
+            command=self._open_html_dictionary,
+        ).grid(row=0, column=3, padx=6)
+        ctk.CTkButton(
+            header, text="📂 Відкрити Папку Патча", width=190, fg_color="#232734", hover_color="#2e3447",
+            command=self._open_patch_folder,
+        ).grid(row=0, column=4, padx=(6, 20))
+
+        # ---- Body (two responsive columns)
+        body = ctk.CTkFrame(root, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew", padx=18, pady=(14, 8))
+        body.grid_columnconfigure((0, 1), weight=1, uniform="cols")
+        body.grid_rowconfigure(0, weight=0)
+        body.grid_rowconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(body, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+        left.grid_columnconfigure(0, weight=1)
+        right = ctk.CTkFrame(body, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
+        right.grid_columnconfigure(0, weight=1)
+
+        # Block 1: reference / donor
+        c1 = self._card(left, "Блок 1: База перекладів та Мод-Донор (Reference Mod)")
+        c1.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        self._path_row(c1, 1, "Англійська гра / BSA (Skyrim Special Edition\\Data) — можна залишити порожнім для автопошуку:",
+                       self.en_source_var, self._browse_en_source)
+        self._path_row(c1, 3, "Український переклад-еталон / донор (папка мода з Nexus / Steam):",
+                       self.uk_ref_var, self._browse_uk_reference)
+        self.import_btn = self._action_button(
+            c1, "⚡ Імпортувати еталон у локальну базу (skyrim_tm.db)", self._start_build_db,
+            primary=True, row=5, column=0, sticky="ew", padx=16, pady=(6, 16),
+        )
+
+        # Block 2: target
+        c2 = self._card(left, "Блок 2: Ціль перекладу (Окремий мод або Модліст)")
+        c2.grid(row=1, column=0, sticky="ew")
+        self.mode_switch = ctk.CTkSegmentedButton(
+            c2, values=[MODE_SINGLE, MODE_MODLIST], variable=self.mode_var,
+            selected_color=ACCENT_GOLD, selected_hover_color=ACCENT_GOLD_HOVER, unselected_color="#232734",
+            text_color=BG_DARK, command=lambda _v: None,
+        )
+        self.mode_switch.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        self._path_row(c2, 3, "Мод (.esp/.esm/.esl, MCM .txt, папка мода) або тека модліста (Mod Organizer 2 / mods):",
+                       self.target_path_var, self._browse_target)
+        self._path_row(c2, 5, "Папка єдиного патча (за замовчуванням ./output/[UA] Skyrim Translation Patch):",
+                       self.output_patch_var, self._browse_output)
+        self.translate_btn = self._action_button(
+            c2, "▶ Перекласти ціль (результат → translated_mods/)", self._start_translation,
+            primary=True, row=7, column=0, sticky="ew", padx=16, pady=(6, 16),
+        )
+
+        # Options card
+        c3 = self._card(right, "Параметри безпеки та перекладу")
+        c3.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        ctk.CTkCheckBox(
+            c3, text="Keep MCM Titles in English (зберігати англійські назви модів у списку MCM)",
+            variable=self.keep_mcm_en_var, text_color=FG_TEXT, fg_color=ACCENT_GOLD, hover_color=ACCENT_GOLD_HOVER,
+        ).grid(row=1, column=0, sticky="w", padx=16, pady=5)
+        ctk.CTkCheckBox(
+            c3, text="Strict Crash-Proof Whitelist (пропускати CELL/WRLD/HDPT/RACE — рекомендовано)",
+            variable=self.strict_whitelist_var, text_color=FG_TEXT, fg_color=ACCENT_GOLD, hover_color=ACCENT_GOLD_HOVER,
+        ).grid(row=2, column=0, sticky="w", padx=16, pady=5)
+        ctk.CTkCheckBox(
+            c3, text="Ollama Fallback (локальний LLM qwen2.5:3b через localhost:11434)",
+            variable=self.use_ollama_var, text_color=FG_TEXT, fg_color=ACCENT_GOLD, hover_color=ACCENT_GOLD_HOVER,
+        ).grid(row=3, column=0, sticky="w", padx=16, pady=(5, 14))
+
+        # Patch & donor merger card
+        c4 = self._card(right, "Патч-Білдер: Модліст + Донор")
+        c4.grid(row=1, column=0, sticky="ew")
+        ctk.CTkLabel(
+            c4, justify="left", anchor="w", text_color=FG_MUTED, wraplength=520,
+            text="Єдиний патч збирається окремо: спочатку шар донора (Strings, Interface, .esp), "
+                 "потім зверху — перекладені моди з translated_mods/.",
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        ctk.CTkCheckBox(
+            c4, text="Додати файли мода-донора (Reference) у фінальний патч",
+            variable=self.include_donor_var, text_color=FG_TEXT, fg_color=ACCENT_GOLD, hover_color=ACCENT_GOLD_HOVER,
+        ).grid(row=2, column=0, sticky="w", padx=16, pady=5)
+        self.patch_btn = self._action_button(
+            c4, "📦 Створити єдиний патч для MO2 / Vortex (Модліст + Донор)", self._start_build_patch,
+            primary=True, row=3, column=0, sticky="ew", padx=16, pady=(6, 8),
+        )
+        ctk.CTkButton(
+            c4, text="💾 Зберегти конфігурацію", height=34, fg_color="#232734", hover_color="#2e3447",
+            command=self._save_current_config,
+        ).grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 16))
+
+        # ---- Live log (bottom, spans both columns)
+        log_card = ctk.CTkFrame(body, fg_color=BG_PANEL, corner_radius=12, border_width=1, border_color=BORDER_COLOR)
+        log_card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
+        log_card.grid_columnconfigure(0, weight=1)
+        log_card.grid_rowconfigure(2, weight=1)
+
+        top = ctk.CTkFrame(log_card, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
+        top.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            top, text="Журнал виконання (Live Log)", text_color=ACCENT_GOLD, anchor="w",
+            font=ctk.CTkFont("Segoe UI", 15, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(top, textvariable=self.speed_var, text_color=ACCENT_GREEN, font=ctk.CTkFont("Consolas", 12, "bold")).grid(
+            row=0, column=1, padx=14)
+        ctk.CTkLabel(top, textvariable=self.tm_rate_var, text_color=ACCENT_GREEN, font=ctk.CTkFont("Consolas", 12, "bold")).grid(
+            row=0, column=2, padx=14)
+        ctk.CTkButton(top, text="Очистити лог", width=120, height=30, fg_color="#232734", hover_color="#2e3447",
+                      command=self._clear_log).grid(row=0, column=3)
+
+        prog = ctk.CTkFrame(log_card, fg_color="transparent")
+        prog.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        prog.grid_columnconfigure(0, weight=1)
+        self.progress_bar = ctk.CTkProgressBar(prog, progress_color=ACCENT_GOLD, fg_color=BG_INPUT, height=14)
+        self.progress_bar.grid(row=0, column=0, sticky="ew")
+        self.progress_bar.set(0.0)
+        ctk.CTkLabel(prog, textvariable=self.status_var, text_color=FG_MUTED, anchor="w").grid(
+            row=1, column=0, sticky="ew", pady=(4, 0))
+
+        self.log_text = ctk.CTkTextbox(
+            log_card, fg_color=BG_INPUT, text_color=FG_TEXT, font=ctk.CTkFont("Consolas", 12), wrap="word"
+        )
+        self.log_text.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
+        self.log_text.configure(state="disabled")
+
+        self._append_log(f"Skyrim SE/AE EN -> UA Translator v{VERSION} запущено.")
+        self._append_log("1) Імпортуйте еталон (донор) у локальну базу, 2) оберіть мод або модліст, 3) за потреби зберіть єдиний патч.")
+
+    # ------------------------------------------------------------------ misc UI actions
     def _setup_sigint(self) -> None:
-        """Ensure graceful checkpoint flush if terminated via SIGINT."""
         def _handler(_sig: int, _frame: Any) -> None:
             self.stop_requested = True
             try:
@@ -173,567 +320,247 @@ class SkyrimTranslatorApp:
         except ValueError:
             pass
 
-    def _build_layout(self) -> None:
-        container = ttk.Frame(self.root, padding=18)
-        container.pack(fill=tk.BOTH, expand=True)
+    def _clear_log(self) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
 
-        # Header
-        header_lbl = ttk.Label(
-            container,
-            text="Skyrim SE/AE — Український локалізатор модів (OPN / TPN)",
-            style="Header.TLabel",
-        )
-        header_lbl.pack(anchor=tk.W, pady=(0, 12))
-
-        # Reference Mod & DB Builder Card (Step 1)
-        ref_card = ttk.Frame(container, style="Card.TFrame", padding=14)
-        ref_card.pack(fill=tk.X, pady=(0, 12))
-
-        ttk.Label(
-            ref_card,
-            text="Крок 1: Ініціалізація бази зі зразка перекладу (Reference Mod)",
-            style="SubHeader.TLabel",
-        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
-
-        ttk.Label(
-            ref_card,
-            text="Оригінальна гра / Англійські файли (Data):",
-            style="Card.TLabel",
-        ).grid(row=1, column=0, sticky=tk.W, padx=(0, 8), pady=4)
-
-        en_entry = tk.Entry(
-            ref_card,
-            textvariable=self.en_source_var,
-            bg=BG_INPUT,
-            fg=FG_TEXT,
-            insertbackground=FG_TEXT,
-            relief="flat",
-            font=("Consolas", 10),
-        )
-        en_entry.grid(row=1, column=1, sticky=tk.EW, padx=4, pady=4, ipady=4)
-        ttk.Button(ref_card, text="Browse Data", command=self._browse_en_source).grid(
-            row=1, column=2, padx=4, pady=4
-        )
-
-        ttk.Label(
-            ref_card,
-            text="Український переклад-еталон (папка з Nexus/Steam):",
-            style="Card.TLabel",
-        ).grid(row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4)
-
-        uk_entry = tk.Entry(
-            ref_card,
-            textvariable=self.uk_ref_var,
-            bg=BG_INPUT,
-            fg=FG_TEXT,
-            insertbackground=FG_TEXT,
-            relief="flat",
-            font=("Consolas", 10),
-        )
-        uk_entry.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=4, ipady=4)
-        ttk.Button(ref_card, text="Browse Reference", command=self._browse_uk_reference).grid(
-            row=2, column=2, padx=4, pady=4
-        )
-
-        ref_btn_row = ttk.Frame(ref_card, style="Card.TFrame")
-        ref_btn_row.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=(6, 0))
-
-        self.build_db_btn = ttk.Button(
-            ref_btn_row,
-            text="⚡ Проаналізувати еталон та створити локальну базу (skyrim_tm.db)",
-            style="Accent.TButton",
-            command=self._start_build_db,
-        )
-        self.build_db_btn.pack(side=tk.LEFT, padx=(0, 12))
-
-        ttk.Label(ref_btn_row, textvariable=self.db_status_var, style="Metric.TLabel").pack(side=tk.LEFT)
-        ref_card.columnconfigure(1, weight=1)
-
-        # Path Selectors Card (Step 2)
-        paths_card = ttk.Frame(container, style="Card.TFrame", padding=14)
-        paths_card.pack(fill=tk.X, pady=(0, 12))
-
-        ttk.Label(
-            paths_card,
-            text="Крок 2: Вибір цільового моду, плагіна (.esp/.esm/.esl) або теки Mod Organizer 2",
-            style="SubHeader.TLabel",
-        ).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 8))
-
-        ttk.Label(paths_card, text="Target Mod / MO2 Folder:", style="Card.TLabel").grid(
-            row=1, column=0, sticky=tk.W, padx=(0, 8), pady=4
-        )
-        target_entry = tk.Entry(
-            paths_card,
-            textvariable=self.target_path_var,
-            bg=BG_INPUT,
-            fg=FG_TEXT,
-            insertbackground=FG_TEXT,
-            relief="flat",
-            font=("Consolas", 10),
-        )
-        target_entry.grid(row=1, column=1, sticky=tk.EW, padx=4, pady=4, ipady=5)
-
-        ttk.Button(paths_card, text="Browse File (.esp/.txt)", command=self._browse_target_file).grid(
-            row=1, column=2, padx=4, pady=4
-        )
-        ttk.Button(paths_card, text="Browse Folder / MO2", command=self._browse_target_folder).grid(
-            row=1, column=3, padx=4, pady=4
-        )
-
-        ttk.Label(paths_card, text="Output Patch Folder:", style="Card.TLabel").grid(
-            row=2, column=0, sticky=tk.W, padx=(0, 8), pady=4
-        )
-        output_entry = tk.Entry(
-            paths_card,
-            textvariable=self.output_patch_var,
-            bg=BG_INPUT,
-            fg=FG_TEXT,
-            insertbackground=FG_TEXT,
-            relief="flat",
-            font=("Consolas", 10),
-        )
-        output_entry.grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=4, ipady=5)
-        ttk.Button(paths_card, text="Browse Output", command=self._browse_output_folder).grid(
-            row=2, column=3, padx=4, pady=4
-        )
-        paths_card.columnconfigure(1, weight=1)
-
-        # Options & Checkboxes Card (Step 3)
-        opts_card = ttk.Frame(container, style="Card.TFrame", padding=14)
-        opts_card.pack(fill=tk.X, pady=(0, 12))
-
-        ttk.Label(opts_card, text="Крок 3: Параметри безпеки та перекладу", style="SubHeader.TLabel").grid(
-            row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8)
-        )
-
-        chk_mcm = ttk.Checkbutton(
-            opts_card,
-            text="Keep MCM Mod Titles in English (Зберігати англійські назви модів у списку MCM)",
-            variable=self.keep_mcm_en_var,
-            command=self._on_mcm_checkbox_toggle,
-        )
-        chk_mcm.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=3)
-
-        mcm_frame = ttk.Frame(opts_card, style="Card.TFrame")
-        mcm_frame.grid(row=1, column=2, sticky=tk.E, pady=3)
-        ttk.Label(mcm_frame, text="MCM Title Mode:", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 6))
-        mcm_combo = ttk.Combobox(
-            mcm_frame,
-            textvariable=self.mcm_mode_var,
-            values=["keep_english", "bilingual", "translate"],
-            state="readonly",
-            width=15,
-        )
-        mcm_combo.pack(side=tk.LEFT)
-        mcm_combo.bind("<<ComboboxSelected>>", self._on_mcm_combo_select)
-
-        chk_whitelist = ttk.Checkbutton(
-            opts_card,
-            text="Strict Crash-Proof Whitelist Mode (Skip CELL/WRLD/HDPT/RACE — Recommended)",
-            variable=self.strict_whitelist_var,
-        )
-        chk_whitelist.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=3)
-
-        chk_ollama = ttk.Checkbutton(
-            opts_card,
-            text="Use Local Ollama LLM for Fallback (Optional — qwen2.5:3b via localhost:11434)",
-            variable=self.use_ollama_var,
-        )
-        chk_ollama.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=3)
-        opts_card.columnconfigure(0, weight=1)
-
-        # Progress & Action Bar Card
-        prog_card = ttk.Frame(container, style="Card.TFrame", padding=14)
-        prog_card.pack(fill=tk.X, pady=(0, 12))
-
-        metrics_row = ttk.Frame(prog_card, style="Card.TFrame")
-        metrics_row.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(metrics_row, textvariable=self.status_var, style="Card.TLabel").pack(side=tk.LEFT)
-        ttk.Label(metrics_row, textvariable=self.tm_rate_var, style="Metric.TLabel").pack(side=tk.RIGHT, padx=(16, 0))
-        ttk.Label(metrics_row, textvariable=self.speed_var, style="Metric.TLabel").pack(side=tk.RIGHT)
-
-        self.progress_bar = ttk.Progressbar(
-            prog_card,
-            variable=self.progress_var,
-            maximum=100.0,
-            mode="determinate",
-            style="Horizontal.TProgressbar",
-        )
-        self.progress_bar.pack(fill=tk.X, pady=(0, 10))
-
-        btn_row = ttk.Frame(prog_card, style="Card.TFrame")
-        btn_row.pack(fill=tk.X)
-
-        self.start_btn = ttk.Button(
-            btn_row,
-            text="▶ Start Translation",
-            style="Accent.TButton",
-            command=self._start_translation,
-        )
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        self.batch_btn = ttk.Button(
-            btn_row,
-            text="⚡ Batch Translate MO2 Modlist",
-            command=self._start_modlist_batch,
-        )
-        self.batch_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        ttk.Button(
-            btn_row,
-            text="💾 Save Config",
-            command=self._save_current_config,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-
-        ttk.Button(
-            btn_row,
-            text="📖 Open HTML Dictionary (INDEX_DICTIONARY.html)",
-            command=self._open_html_dictionary,
-        ).pack(side=tk.RIGHT)
-
-        # Live Console Log
-        log_card = ttk.Frame(container, style="Card.TFrame", padding=12)
-        log_card.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(log_card, text="Крок 4: Консоль виконання (Live Translation Log)", style="SubHeader.TLabel").pack(
-            anchor=tk.W, pady=(0, 6)
-        )
-
-        self.log_text = tk.Text(
-            log_card,
-            bg=BG_INPUT,
-            fg=FG_TEXT,
-            insertbackground=FG_TEXT,
-            relief="flat",
-            font=("Consolas", 9),
-            wrap=tk.WORD,
-            state=tk.DISABLED,
-        )
-        scrollbar = ttk.Scrollbar(log_card, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._append_log("Skyrim SE/AE EN -> UA Mod Translator initialized.")
-        self._append_log("Select a plugin (.esp/.esm/.esl), MCM file, Mod Folder, or MO2 mods directory to begin.")
+    def _append_log(self, msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", f"[{ts}] {msg}\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
 
     def _refresh_db_status(self) -> None:
+        pairs = 0
+        terms = 0
         try:
-            if DB_PATH.exists():
-                db = SkyrimTranslationDB(DB_PATH)
-                summary = db.get_summary_counts()
+            if DB_PATH.exists() and DB_PATH.stat().st_size > 0:
+                db = SkyrimTranslationDB(DB_PATH, auto_seed=False)
+                pairs = db.get_summary_counts().get("total_rows", 0)
                 db.close()
-                total = summary.get("total_rows", 0)
-                if total > 0:
-                    self.db_status_var.set(f"Локальна база готова: {total:,} пар у skyrim_tm.db")
-                    return
-            self.db_status_var.set("Локальна база не створена. Вкажіть шляхи вище та натисніть 'Проаналізувати еталон'")
+            if GLOSSARY_PATH.exists():
+                import json
+
+                terms = len(json.loads(GLOSSARY_PATH.read_text(encoding="utf-8")))
         except Exception:
-            self.db_status_var.set("Помилка читання skyrim_tm.db")
+            pass
+        self.db_badge_var.set(f"База TM: {pairs:,} пар | Глосарій: {terms:,} термінів")
+
+    def _open_html_dictionary(self) -> None:
+        idx = generate_master_index()
+        webbrowser.open(idx.resolve().as_uri())
+        self._append_log(f"Відкрито словник: {idx}")
+
+    def _patch_dir(self) -> Path:
+        raw = sanitize_output_patch_dir(self.output_patch_var.get().strip())
+        return resolve_portable_path(raw, "./output/[UA] Skyrim Translation Patch")
+
+    def _open_patch_folder(self) -> None:
+        p = self._patch_dir()
+        if not p.exists():
+            messagebox.showinfo("Папка патча", f"Патч ще не створено:\n{p}")
+            return
+        _open_path(p)
 
     def _browse_en_source(self) -> None:
-        chosen = filedialog.askdirectory(title="Оберіть теку гри або англійських файлів (Skyrim Special Edition/Data)")
+        chosen = filedialog.askdirectory(title="Skyrim Special Edition\\Data (англійські файли / BSA)")
         if chosen:
             self.en_source_var.set(chosen)
 
     def _browse_uk_reference(self) -> None:
-        chosen = filedialog.askdirectory(title="Оберіть папку українського перекладу-еталона (ОПН/ТПН з Nexus/Steam)")
+        chosen = filedialog.askdirectory(title="Папка українського перекладу-еталона (ОПН / ТПН)")
         if chosen:
             self.uk_ref_var.set(chosen)
 
-    def _start_build_db(self) -> None:
-        if self.is_running:
-            return
-        en_str = self.en_source_var.get().strip()
-        uk_str = self.uk_ref_var.get().strip()
-        if not en_str or not uk_str:
-            messagebox.showwarning(
-                "Необхідно вказати обидва шляхи",
-                "Будь ласка, оберіть шлях до англійських файлів (Skyrim Special Edition/Data)\n"
-                "та шлях до завантаженого українського перекладу-еталона (ОПН/ТПН).",
-            )
-            return
-
-        en_path = Path(en_str)
-        uk_path = Path(uk_str)
-        if not en_path.exists():
-            messagebox.showerror("Помилка шляху", f"Шлях до англійських файлів не існує:\n{en_path}")
-            return
-        if not uk_path.exists():
-            messagebox.showerror("Помилка шляху", f"Шлях до перекладу-еталона не існує:\n{uk_path}")
-            return
-
-        self.is_running = True
-        self.build_db_btn.configure(state=tk.DISABLED)
-        self.start_btn.configure(state=tk.DISABLED)
-        self.batch_btn.configure(state=tk.DISABLED)
-        self.progress_var.set(2.0)
-        self.status_var.set("Аналіз перекладу-еталона...")
-
-        req = TMBuildRequest(
-            en_source_path=en_path,
-            uk_reference_path=uk_path,
-            reset_db=False,
-        )
-        threading.Thread(target=self._worker_build_db, args=(req,), daemon=True).start()
-
-    def _worker_build_db(self, req: TMBuildRequest) -> None:
-        self.log_queue.put({"type": "log", "text": f"Початок аналізу еталона: {req.uk_reference_path}"})
-        try:
-            def _prog(msg: str, pct: float) -> None:
-                self.log_queue.put({"type": "log", "text": msg})
-                self.log_queue.put({"type": "progress", "status": msg, "pct": pct})
-
-            res = build_tm_from_reference(req, progress_callback=_prog)
-            self.log_queue.put({
-                "type": "log",
-                "text": (
-                    f"[УСПІХ] Базу skyrim_tm.db успішно створено: {res.total_tm_rows:,} пар, "
-                    f"{res.glossary_terms_count:,} термінів глосарію ({res.elapsed_sec}s)."
-                ),
-            })
-            self.log_queue.put({
-                "type": "progress",
-                "status": f"База створена ({res.total_tm_rows:,} пар)",
-                "pct": 100.0,
-            })
-        except Exception as exc:
-            self.log_queue.put({"type": "log", "text": f"[ПОМИЛКА] {exc}"})
-        finally:
-            self.log_queue.put({"type": "done_build_db"})
-
-    def _on_mcm_checkbox_toggle(self) -> None:
-        if self.keep_mcm_en_var.get():
-            self.mcm_mode_var.set("keep_english")
-        elif self.mcm_mode_var.get() == "keep_english":
-            self.mcm_mode_var.set("translate")
-
-    def _on_mcm_combo_select(self, _event: Any = None) -> None:
-        self.keep_mcm_en_var.set(self.mcm_mode_var.get() == "keep_english")
-
-    def _browse_target_file(self) -> None:
-        chosen = filedialog.askopenfilename(
-            title="Select Skyrim Plugin or MCM File",
-            filetypes=[
-                ("Skyrim Plugins & MCM", "*.esp *.esm *.esl *.txt"),
-                ("Creation Engine Plugins", "*.esp *.esm *.esl"),
-                ("MCM Translation Files", "*_english.txt *.txt"),
-                ("All Files", "*.*"),
-            ],
-        )
+    def _browse_target(self) -> None:
+        if self.mode_var.get() == MODE_SINGLE:
+            chosen = filedialog.askopenfilename(
+                title="Плагін або MCM-файл",
+                filetypes=[("Плагіни та MCM", "*.esp *.esm *.esl *.txt"), ("Усі файли", "*.*")],
+            ) or filedialog.askdirectory(title="Або оберіть папку мода")
+        else:
+            chosen = filedialog.askdirectory(title="Теки модліста (Mod Organizer 2 / mods)")
         if chosen:
             self.target_path_var.set(chosen)
 
-    def _browse_target_folder(self) -> None:
-        chosen = filedialog.askdirectory(title="Select Mod Folder or Mod Organizer 2 mods/ Folder")
-        if chosen:
-            self.target_path_var.set(chosen)
-
-    def _browse_output_folder(self) -> None:
-        chosen = filedialog.askdirectory(title="Select Output Patch Folder")
+    def _browse_output(self) -> None:
+        chosen = filedialog.askdirectory(title="Папка єдиного патча")
         if chosen:
             self.output_patch_var.set(chosen)
 
     def _save_current_config(self) -> TranslatorConfig:
         self.cfg.mo2_mods_dir = self.target_path_var.get().strip() or "./mods"
-        self.cfg.output_patch_dir = self.output_patch_var.get().strip() or "./output/[UA] Skyrim Translation Patch"
-        self.cfg.mcm_title_mode = self.mcm_mode_var.get().strip() or "keep_english"
+        self.cfg.output_patch_dir = sanitize_output_patch_dir(self.output_patch_var.get().strip())
+        self.output_patch_var.set(self.cfg.output_patch_dir)
+        self.cfg.mcm_title_mode = "keep_english" if self.keep_mcm_en_var.get() else "translate"
         self.cfg.strict_whitelist_mode = bool(self.strict_whitelist_var.get())
         self.cfg.use_local_ollama = bool(self.use_ollama_var.get())
+        if self.en_source_var.get().strip():
+            self.cfg.game_data_dir = self.en_source_var.get().strip()
+        if self.uk_ref_var.get().strip():
+            self.cfg.reference_dir = self.uk_ref_var.get().strip()
         save_config_model(self.cfg)
-        self._append_log("Configuration saved to config.json.")
+        self._append_log("Конфігурацію збережено в config.json.")
         return self.cfg
 
-    def _open_html_dictionary(self) -> None:
-        idx_path = INDEX_PATH
-        if not idx_path.exists():
-            idx_path = generate_master_index()
-        if idx_path.exists():
-            webbrowser.open(idx_path.resolve().as_uri())
-            self._append_log(f"Opened HTML Dictionary: {idx_path}")
-        else:
-            messagebox.showinfo("Dictionary Not Found", "No translated mods dictionary exists yet.")
+    # ------------------------------------------------------------------ background jobs
+    def _set_busy(self, busy: bool) -> None:
+        self.is_running = busy
+        for b in self._action_buttons:
+            b.configure(state="disabled" if busy else "normal")
 
-    def _append_log(self, msg: str) -> None:
-        ts = time.strftime("%H:%M:%S")
-        self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, f"[{ts}] {msg}\n")
-        self.log_text.see(tk.END)
-        self.log_text.configure(state=tk.DISABLED)
+    def _run_job(self, name: str, fn: Any) -> None:
+        if self.is_running:
+            return
+        self._set_busy(True)
+        self.progress_bar.set(0.02)
+        self.status_var.set(f"{name}…")
 
+        def runner() -> None:
+            try:
+                fn()
+            except Exception as exc:
+                self.log_queue.put({"type": "log", "text": f"[ПОМИЛКА] {exc}"})
+            finally:
+                self.log_queue.put({"type": "done"})
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _progress_cb(self, msg: str, pct: float) -> None:
+        self.log_queue.put({"type": "log", "text": msg})
+        self.log_queue.put({"type": "progress", "status": msg, "pct": pct})
+
+    def _start_build_db(self) -> None:
+        uk = self.uk_ref_var.get().strip()
+        if not uk or not Path(uk).exists():
+            messagebox.showwarning("Еталон не вказано", "Вкажіть існуючу папку українського перекладу-еталона (донора).")
+            return
+        en = self.en_source_var.get().strip()
+        extra = []
+        tgt = self.target_path_var.get().strip()
+        if self.mode_var.get() == MODE_MODLIST and tgt and Path(tgt).is_dir():
+            extra.append(Path(tgt))
+        self._save_current_config()
+        req = TMBuildRequest(
+            uk_reference_path=Path(uk),
+            en_source_path=Path(en) if en else None,
+            extra_en_roots=extra,
+        )
+
+        def job() -> None:
+            res = build_tm_from_reference(req, progress_callback=self._progress_cb)
+            self.log_queue.put({
+                "type": "log",
+                "text": (
+                    f"[УСПІХ] skyrim_tm.db: {res.total_tm_rows:,} пар (StringID: {res.strings_pairs_count:,}, "
+                    f"плагіни: {res.plugin_pairs_count:,}, MCM/UI: {res.mcm_pairs_count:,}, "
+                    f"словники: {res.dictionary_pairs_count:,}); глосарій: {res.glossary_terms_count:,} термінів."
+                ),
+            })
+
+        self._run_job("Імпорт еталона", job)
+
+    def _start_translation(self) -> None:
+        tgt = self.target_path_var.get().strip()
+        if not tgt or not Path(tgt).exists():
+            messagebox.showwarning("Ціль не вказано", "Вкажіть існуючий мод або теку модліста.")
+            return
+        cfg = self._save_current_config()
+        target = Path(tgt)
+        single = self.mode_var.get() == MODE_SINGLE
+        t0 = time.perf_counter()
+
+        def job() -> None:
+            if single:
+                req = ModTranslationRequest(
+                    target_path=target,
+                    mcm_title_mode=cfg.mcm_title_mode,
+                    strict_whitelist_mode=cfg.strict_whitelist_mode,
+                    use_local_ollama=cfg.use_local_ollama,
+                    max_workers=cfg.max_workers,
+                    batch_size=cfg.batch_size,
+                )
+                results = [translate_mod_target(req, progress_cb=self._progress_cb)]
+            else:
+                mods_dir = target / "mods" if (target / "mods").is_dir() else target
+                results = translate_modlist(
+                    mods_dir,
+                    mcm_title_mode=cfg.mcm_title_mode,
+                    strict_whitelist_mode=cfg.strict_whitelist_mode,
+                    use_local_ollama=cfg.use_local_ollama,
+                    progress_cb=self._progress_cb,
+                )
+            total = sum(r.total_strings for r in results)
+            tm = sum(r.tm_hits for r in results)
+            elapsed = max(0.01, time.perf_counter() - t0)
+            self.log_queue.put({
+                "type": "progress", "status": "Переклад завершено", "pct": 100.0,
+                "speed": total / elapsed, "tm_rate": 100.0 * tm / max(1, total),
+            })
+            self.log_queue.put({
+                "type": "log",
+                "text": f"[УСПІХ] Модів: {len(results)}, рядків: {total:,}, збігів TM: {tm:,}. "
+                        f"Результат: {get_translated_mods_dir()}",
+            })
+            generate_master_index()
+
+        self._run_job("Переклад", job)
+
+    def _start_build_patch(self) -> None:
+        self._save_current_config()
+        req = PatchBuildRequest(
+            output_patch_dir=self._patch_dir(),
+            donor_dir=Path(self.uk_ref_var.get().strip()) if self.uk_ref_var.get().strip() else None,
+            include_donor=bool(self.include_donor_var.get()),
+        )
+
+        def job() -> None:
+            res = build_unified_mo2_patch(req, progress_cb=self._progress_cb)
+            self.log_queue.put({
+                "type": "log",
+                "text": (
+                    f"[УСПІХ] Єдиний патч: {res.total_files:,} файлів "
+                    f"(донор: {res.donor_files:,}, моди: {res.mod_files:,} з {len(res.mods_merged)}) → {res.patch_dir}"
+                ),
+            })
+
+        self._run_job("Збірка єдиного патча", job)
+
+    # ------------------------------------------------------------------ queue pump
     def _poll_queue(self) -> None:
-        while not self.log_queue.empty():
-            item = self.log_queue.get_nowait()
+        while True:
+            try:
+                item = self.log_queue.get_nowait()
+            except queue.Empty:
+                break
             kind = item.get("type")
             if kind == "log":
                 self._append_log(item["text"])
             elif kind == "progress":
-                self.progress_var.set(float(item.get("pct", 0.0)))
-                self.status_var.set(item.get("status", "Translating..."))
+                self.progress_bar.set(max(0.0, min(1.0, float(item.get("pct", 0.0)) / 100.0)))
+                self.status_var.set(item.get("status", "Виконується…"))
                 if "speed" in item:
-                    self.speed_var.set(f"Speed: {item['speed']:.1f} strings/sec")
+                    self.speed_var.set(f"Рядків/сек: {item['speed']:.1f}")
                 if "tm_rate" in item:
-                    self.tm_rate_var.set(f"TM Cache Hit Rate: {item['tm_rate']:.1f}%")
+                    self.tm_rate_var.set(f"TM Hit Rate: {item['tm_rate']:.1f}%")
             elif kind == "done":
-                self.is_running = False
-                self.start_btn.configure(state=tk.NORMAL)
-                self.batch_btn.configure(state=tk.NORMAL)
-                self.build_db_btn.configure(state=tk.NORMAL)
-                self.progress_var.set(100.0)
-                self.status_var.set("Translation Complete.")
-            elif kind == "done_build_db":
-                self.is_running = False
-                self.start_btn.configure(state=tk.NORMAL)
-                self.batch_btn.configure(state=tk.NORMAL)
-                self.build_db_btn.configure(state=tk.NORMAL)
+                self._set_busy(False)
                 self._refresh_db_status()
-                messagebox.showinfo("Готово", "Локальну базу перекладів skyrim_tm.db успішно сформовано!")
+                if self.progress_bar.get() < 1.0:
+                    self.status_var.set("Завершено (див. журнал).")
         self.root.after(100, self._poll_queue)
 
-    def _start_translation(self) -> None:
-        if self.is_running:
-            return
-        target_str = self.target_path_var.get().strip()
-        if not target_str:
-            messagebox.showwarning("Missing Target", "Please select a plugin file or mod folder first.")
-            return
+    def run(self) -> None:
+        self.root.mainloop()
 
-        target_path = Path(target_str)
-        if not target_path.exists():
-            messagebox.showerror("Invalid Path", f"Target path does not exist:\n{target_path}")
-            return
 
-        cfg = self._save_current_config()
-        self.is_running = True
-        self.start_btn.configure(state=tk.DISABLED)
-        self.batch_btn.configure(state=tk.DISABLED)
-        self.progress_var.set(5.0)
-        self.status_var.set("Starting translation...")
-
-        req = ModTranslationRequest(
-            target_path=target_path,
-            output_patch_dir=Path(cfg.output_patch_dir),
-            mcm_title_mode=cfg.mcm_title_mode,
-            strict_whitelist_mode=cfg.strict_whitelist_mode,
-            use_local_ollama=cfg.use_local_ollama,
-            max_workers=cfg.max_workers,
-            batch_size=cfg.batch_size,
-        )
-
-        threading.Thread(target=self._worker_single_target, args=(req,), daemon=True).start()
-
-    def _worker_single_target(self, req: ModTranslationRequest) -> None:
-        t0 = time.perf_counter()
-        self.log_queue.put({"type": "log", "text": f"Starting translation for: {req.target_path}"})
-        try:
-            def _prog(msg: str, pct: float) -> None:
-                self.log_queue.put({"type": "log", "text": msg})
-                self.log_queue.put({"type": "progress", "status": msg, "pct": pct})
-
-            res: ModTranslationResult = translate_mod_target(req, progress_cb=_prog)
-            elapsed = max(0.01, time.perf_counter() - t0)
-            speed = res.total_strings / elapsed
-            tm_rate = (res.tm_hits / max(1, res.total_strings)) * 100.0
-
-            self.log_queue.put({
-                "type": "progress",
-                "status": f"Completed {res.mod_name}",
-                "pct": 100.0,
-                "speed": speed,
-                "tm_rate": tm_rate,
-            })
-            self.log_queue.put({
-                "type": "log",
-                "text": (
-                    f"[SUCCESS] {res.mod_name}: {res.total_strings} strings "
-                    f"(TM={res.tm_hits} [{tm_rate:.1f}%], Neural={res.neural_translated}) "
-                    f"in {res.elapsed_sec}s ({speed:.1f} str/s)."
-                ),
-            })
-            self.log_queue.put({"type": "log", "text": f"Output Patch: {res.output_patch_dir}"})
-            self.log_queue.put({"type": "log", "text": f"HTML Dictionary: {res.html_dictionary_path}"})
-        except Exception as exc:
-            self.log_queue.put({"type": "log", "text": f"[ERROR] {exc}"})
-        finally:
-            self.log_queue.put({"type": "done"})
-
-    def _start_modlist_batch(self) -> None:
-        if self.is_running:
-            return
-        target_str = self.target_path_var.get().strip()
-        target_path = Path(target_str)
-        if not target_path.exists() or not target_path.is_dir():
-            messagebox.showwarning(
-                "Select MO2 Folder",
-                "Please select a valid Mod Organizer 2 directory or mods/ folder first.",
-            )
-            return
-
-        # Automatically detect `mods/` subfolder if user selected MO2 root folder
-        mods_dir = target_path / "mods" if (target_path / "mods").is_dir() else target_path
-        cfg = self._save_current_config()
-        self.is_running = True
-        self.start_btn.configure(state=tk.DISABLED)
-        self.batch_btn.configure(state=tk.DISABLED)
-        self.progress_var.set(2.0)
-
-        threading.Thread(
-            target=self._worker_modlist_batch,
-            args=(mods_dir, Path(cfg.output_patch_dir)),
-            daemon=True,
-        ).start()
-
-    def _worker_modlist_batch(self, mods_dir: Path, patch_dir: Path) -> None:
-        t0 = time.perf_counter()
-        self.log_queue.put({"type": "log", "text": f"Scanning modlist folder: {mods_dir}..."})
-        try:
-            scan_res = scan_all_modpack_mods(mods_dir=mods_dir, save_outputs=True)
-            total_mods = scan_res.get("summary", {}).get("translatable_mods", 0)
-            self.log_queue.put({
-                "type": "log",
-                "text": f"Cataloged {total_mods} translatable mods. Starting batch waves...",
-            })
-
-            orch = ModpackBatchOrchestrator(mods_dir=mods_dir, patch_dir=patch_dir)
-            try:
-                total_strings_done = 0
-                for idx, wave_id in enumerate([1, 2, 3, 4], 1):
-                    self.log_queue.put({
-                        "type": "progress",
-                        "status": f"Executing Wave {wave_id}...",
-                        "pct": (idx - 1) * 25.0,
-                    })
-                    w_res = orch.execute_wave(wave_id, sync_to_mo2=True)
-                    total_strings_done += w_res.get("total_strings_processed", 0)
-                    elapsed = max(0.01, time.perf_counter() - t0)
-                    speed = total_strings_done / elapsed
-                    self.log_queue.put({
-                        "type": "progress",
-                        "status": f"Finished Wave {wave_id}",
-                        "pct": idx * 25.0,
-                        "speed": speed,
-                    })
-                    self.log_queue.put({
-                        "type": "log",
-                        "text": (
-                            f"[Wave {wave_id}] Processed {w_res.get('processed_now', 0)} mods "
-                            f"({w_res.get('total_strings_processed', 0)} strings) in {w_res.get('elapsed_sec', 0)}s."
-                        ),
-                    })
-                ensure_mo2_patch_meta_ini(patch_dir)
-                generate_master_index()
-            finally:
-                orch.close()
-        except Exception as exc:
-            self.log_queue.put({"type": "log", "text": f"[ERROR] Batch translation failed: {exc}"})
-        finally:
-            self.log_queue.put({"type": "done"})
+SkyrimTranslatorApp = TranslatorApp
 
 
 def launch_gui() -> None:
-    root = tk.Tk()
-    SkyrimTranslatorApp(root)
-    root.mainloop()
+    TranslatorApp().run()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Phase 2 - Step 2: 3-Tier Hybrid Translation Engine (core/hybrid_translator.py)
 Implements:
 - Tier 1: Exact Translation Memory Lookup (<0.3 ms SQLite skyrim_tm.db across 100,184 OPN/TPN/SSE-AT pairs)
@@ -639,7 +639,7 @@ class HybridTranslator:
                     "en_text": s,
                     "uk_text": uk_val,
                     "tier_used": "Tier 1 (Exact TM)" if src_grp != "CUSTOM_MOD" else "Tier 2 (Cached Neural + Lore)",
-                    "source": "TM" if src_grp != "CUSTOM_MOD" else "Glossary+Neural",
+                    "source": "TM",
                 }
                 continue
 

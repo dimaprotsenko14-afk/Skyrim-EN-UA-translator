@@ -14,6 +14,7 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config.example.json"
 
 VALID_TITLE_MODES = ("keep_english", "bilingual", "translate")
+DEFAULT_OUTPUT_PATCH_REL = "./output/[UA] Skyrim Translation Patch"
 
 
 class InvalidTargetError(ValueError):
@@ -63,10 +64,27 @@ class TranslatorConfig:
             merged[k] = val
         if merged.get("mcm_title_mode") not in VALID_TITLE_MODES:
             merged["mcm_title_mode"] = "keep_english"
+        merged["output_patch_dir"] = sanitize_output_patch_dir(merged.get("output_patch_dir"))
         return cls(**merged)
 
 
 DEFAULT_CONFIG: Dict[str, Any] = TranslatorConfig().to_dict()
+
+
+def sanitize_output_patch_dir(raw_path: str | Path | None) -> str:
+    """
+    Strict output path guard: the unified patch folder must never be the application root directory
+    (or one of its parents), otherwise plugins and meta.ini would be written next to main.py.
+    Falls back to ./output/[UA] Skyrim Translation Patch.
+    """
+    if not raw_path or not str(raw_path).strip():
+        return DEFAULT_OUTPUT_PATCH_REL
+    cand = Path(raw_path)
+    resolved = (cand if cand.is_absolute() else PROJECT_ROOT / cand).resolve()
+    root = PROJECT_ROOT.resolve()
+    if resolved == root or resolved in root.parents:
+        return DEFAULT_OUTPUT_PATCH_REL
+    return str(raw_path)
 
 
 def ensure_safe_output_path(target_path: Path | str, output_root: Path | str) -> Path:
@@ -113,6 +131,7 @@ def load_config_model(config_path: Optional[Path] = None) -> TranslatorConfig:
 def save_config_model(cfg: TranslatorConfig, config_path: Optional[Path] = None) -> Path:
     """Persist structured TranslatorConfig to config.json."""
     target_cfg = config_path or CONFIG_PATH
+    cfg.output_patch_dir = sanitize_output_patch_dir(cfg.output_patch_dir)
     target_cfg.write_text(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return target_cfg
 
@@ -140,6 +159,11 @@ def get_mo2_profile_dir() -> Path:
 
 def get_output_patch_dir() -> Path:
     return resolve_portable_path(load_config_model().output_patch_dir, "./output/[UA] Skyrim Translation Patch")
+
+
+def get_translated_mods_dir() -> Path:
+    """Folder where every individually translated mod is stored (translated_mods/<ModName>/)."""
+    return PROJECT_ROOT / "translated_mods"
 
 
 def get_reference_dir() -> Path:

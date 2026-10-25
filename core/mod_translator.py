@@ -1,4 +1,4 @@
-"""
+﻿"""
 Universal Skyrim SE/AE Mod & Plugin Translator (core/mod_translator.py).
 Translates standalone .esp/.esm/.esl plugins, Interface/Translations/*_english.txt MCM files,
 SKSE/Plugins/MCM/Config/*/config.json (MCM Helper JSONs), Strings/*.*strings tables, and
@@ -33,6 +33,7 @@ from core.config import (
     get_output_patch_dir,
     is_mcm_quest_title,
     is_mod_title_key,
+    sanitize_output_patch_dir,
 )
 from core.database import SkyrimTranslationDB
 from core.dictionary_exporter import cleanup_legacy_reports, generate_master_index
@@ -78,7 +79,8 @@ class ModTranslationRequest:
     """RORO input object for translating a single plugin, mod folder, or MO2 directory."""
 
     target_path: Path
-    output_patch_dir: Path = field(default_factory=get_output_patch_dir)
+    output_patch_dir: Optional[Path] = None
+    build_patch: bool = False
     mcm_title_mode: str = "keep_english"
     strict_whitelist_mode: bool = True
     use_local_ollama: bool = False
@@ -386,10 +388,11 @@ def translate_mod_plugin(
             cand = apply_mcm_title_mode(en_str, cand, mode=active_title_mode)
         return cand
 
-    _ensure_mo2_patch_meta_ini(output_root)
     out_backup_dir = (TRANSLATED_MODS_DIR / mod_folder_name).resolve()
     ensure_safe_output_path(out_backup_dir, TRANSLATED_MODS_DIR.resolve())
     out_backup_dir.mkdir(parents=True, exist_ok=True)
+    if output_root != out_backup_dir:
+        _ensure_mo2_patch_meta_ini(output_root)
     out_backup_esp = out_backup_dir / source_esp_path.name
 
     rebuild_stats = rebuild_plugin_file(
@@ -398,7 +401,8 @@ def translate_mod_plugin(
         translation_fn=_translate_record_cb,
         skip_npc=skip_npc,
     )
-    shutil.copy2(target_path, out_backup_esp)
+    if target_path.resolve() != out_backup_esp.resolve():
+        shutil.copy2(target_path, out_backup_esp)
 
     reparsed = parse_plugin_file(target_path)
     integrity_ok = len(reparsed["records"]) == len(records)
@@ -551,13 +555,15 @@ def translate_mod_mcm_file(
             "uk_text": uk_val,
         })
 
-    _ensure_mo2_patch_meta_ini(output_root)
     out_backup_dir = (TRANSLATED_MODS_DIR / mod_folder_name).resolve()
     ensure_safe_output_path(out_backup_dir, TRANSLATED_MODS_DIR.resolve())
+    if output_root != out_backup_dir:
+        _ensure_mo2_patch_meta_ini(output_root)
     out_backup_mcm = out_backup_dir / "Interface" / "Translations" / source_mcm_path.name
 
     write_translate_txt(translated_entries, target_path)
-    write_translate_txt(translated_entries, out_backup_mcm)
+    if target_path.resolve() != out_backup_mcm.resolve():
+        write_translate_txt(translated_entries, out_backup_mcm)
 
     prefixes = list(dict.fromkeys([
         mod_folder_name,
@@ -598,6 +604,10 @@ def translate_mod_mcm_file(
     }
 
 
+def _safe_folder_name(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip() or "UnnamedMod"
+
+
 def translate_mod_target(
     request: ModTranslationRequest,
     progress_cb: Optional[Callable[[str, float], None]] = None,
@@ -612,7 +622,20 @@ def translate_mod_target(
     if not target.exists():
         raise InvalidTargetError(f"Target path does not exist: {target}")
 
-    output_root = Path(request.output_patch_dir).resolve()
+    if target.is_file():
+        resolved_mod_name = target.stem.replace("_english", "") if target.suffix.lower() == ".txt" else target.stem
+    else:
+        resolved_mod_name = target.name
+    if request.build_patch and request.output_patch_dir:
+        output_root = Path(sanitize_output_patch_dir(request.output_patch_dir))
+        if not output_root.is_absolute():
+            output_root = PROJECT_ROOT / output_root
+        output_root = output_root.resolve()
+    else:
+        # Single mod: store cleanly in translated_mods/<ModName>/ (never in the application root).
+        output_root = (TRANSLATED_MODS_DIR / _safe_folder_name(resolved_mod_name)).resolve()
+    if output_root == PROJECT_ROOT.resolve():
+        raise InvalidTargetError("Output folder must not be the application root directory.")
     output_root.mkdir(parents=True, exist_ok=True)
     t_start = time.perf_counter()
 
@@ -720,15 +743,74 @@ def translate_mod_target(
                 result.html_dictionary_path = info["exported_reports"]["html_path"]
                 result.details.append(info)
 
+            # Loose Strings/*_english.*strings inside the mod folder
+            strings_dir = target / "Strings"
+            loose_strings = (
+                sorted(
+                    [
+                        sf
+                        for sf in strings_dir.iterdir()
+                        if sf.is_file()
+                        and sf.name.lower().endswith(("_english.strings", "_english.dlstrings", "_english.ilstrings"))
+                    ],
+                    key=lambda x: x.name.lower(),
+                )
+                if strings_dir.exists()
+                else []
+            )
+            out_backup_dir = (TRANSLATED_MODS_DIR / _safe_folder_name(mod_name)).resolve()
+            out_backup_dir.mkdir(parents=True, exist_ok=True)
+
+            for sfile in loose_strings:
+                fname = sfile.name
+                target_str = output_root / "Strings" / fname
+                if not target_str.resolve().is_relative_to(output_root):
+                    raise PathTraversalError(f"Blocked loose Strings traversal: {fname}")
+                is_len_pref = fname.lower().endswith((".dlstrings", ".ilstrings"))
+                st_table = parse_string_table_bytes(sfile.read_bytes(), is_length_prefixed=is_len_pref)
+                u_vals = list(dict.fromkeys(v.strip() for v in st_table.values() if v.strip()))
+                b_res = translator.translate_batch_deduplicated(u_vals, module_name=mod_name, record_type="STRINGS")
+                tr_table = {sid: b_res.get(v.strip(), {}).get("uk_text", v) for sid, v in st_table.items()}
+                write_string_table_file(tr_table, target_str)
+                if output_root != out_backup_dir:
+                    write_string_table_file(tr_table, out_backup_dir / "Strings" / fname)
+                tm_cnt = sum(1 for v in u_vals if str(b_res.get(v, {}).get("source", "TM")).startswith("TM"))
+                result.strings_tables_translated += 1
+                result.total_strings += len(u_vals)
+                result.tm_hits += tm_cnt
+                result.neural_translated += len(u_vals) - tm_cnt
+                rep_rows = [
+                    {
+                        "record_subrecord": f"STRINGS:{sfile.suffix.lstrip('.').upper()}",
+                        "form_id": f"0x{sid:08X}",
+                        "editor_id": fname,
+                        "source": str(b_res.get(v.strip(), {}).get("source", "TM")),
+                        "en_text": v.strip(),
+                        "uk_text": tr_table.get(sid, v).strip(),
+                    }
+                    for sid, v in st_table.items()
+                    if v and v.strip()
+                ]
+                exp = export_mod_translation_reports(
+                    rows=rep_rows,
+                    output_dir=out_backup_dir,
+                    mod_title=f"{mod_name} ({fname})",
+                    file_prefixes=[mod_name, fname],
+                    section=fname,
+                )
+                result.html_dictionary_path = exp["html_path"]
+
             # Also inspect BSA archives in the mod folder for packed MCMs or Strings
             for bsa_file in bsas:
                 done_steps += 1
+                if any(tok in bsa_file.name.lower() for tok in ("texture", "mesh", "sound", "voice", "animation", "shader")):
+                    continue
                 try:
                     archive = BSAArchive(bsa_file)
                 except Exception:
                     continue
                 for entry in archive.entries:
-                    pl = entry["path_lower"]
+                    pl = entry["path_lower"].replace("\\", "/")
                     if pl.startswith("interface/translations/") and pl.endswith("_english.txt"):
                         fname = Path(pl).name
                         target_mcm = output_root / "Interface" / "Translations" / fname
@@ -740,8 +822,33 @@ def translate_mod_target(
                         b_res = translator.translate_batch_deduplicated(u_vals, module_name=mod_name, record_type="MCM")
                         tr_map = {k: b_res.get(v.strip(), {}).get("uk_text", v) for k, v in entries_map.items()}
                         write_translate_txt(tr_map, target_mcm)
+                        if output_root != out_backup_dir:
+                            write_translate_txt(tr_map, out_backup_dir / "Interface" / "Translations" / fname)
+                        tm_cnt = sum(1 for v in u_vals if str(b_res.get(v, {}).get("source", "TM")).startswith("TM"))
                         result.mcm_files_translated += 1
                         result.total_strings += len(u_vals)
+                        result.tm_hits += tm_cnt
+                        result.neural_translated += len(u_vals) - tm_cnt
+                        rep_rows = [
+                            {
+                                "record_subrecord": "MCM:TXT",
+                                "form_id": k,
+                                "editor_id": k,
+                                "source": str(b_res.get(v.strip(), {}).get("source", "TM")),
+                                "en_text": v.strip(),
+                                "uk_text": tr_map.get(k, v).strip(),
+                            }
+                            for k, v in entries_map.items()
+                            if v and v.strip()
+                        ]
+                        exp = export_mod_translation_reports(
+                            rows=rep_rows,
+                            output_dir=out_backup_dir,
+                            mod_title=f"{mod_name} ({fname})",
+                            file_prefixes=[mod_name, fname],
+                            section=fname,
+                        )
+                        result.html_dictionary_path = exp["html_path"]
                     elif pl.startswith("strings/") and pl.endswith(("_english.strings", "_english.dlstrings", "_english.ilstrings")):
                         fname = Path(pl).name
                         target_str = output_root / "Strings" / fname
@@ -753,9 +860,34 @@ def translate_mod_target(
                         u_vals = list(dict.fromkeys(v.strip() for v in st_table.values() if v.strip()))
                         b_res = translator.translate_batch_deduplicated(u_vals, module_name=mod_name, record_type="STRINGS")
                         tr_table = {sid: b_res.get(v.strip(), {}).get("uk_text", v) for sid, v in st_table.items()}
-                        write_string_table_file(tr_table, target_str, is_length_prefixed=is_len_pref)
+                        write_string_table_file(tr_table, target_str)
+                        if output_root != out_backup_dir:
+                            write_string_table_file(tr_table, out_backup_dir / "Strings" / fname)
+                        tm_cnt = sum(1 for v in u_vals if str(b_res.get(v, {}).get("source", "TM")).startswith("TM"))
                         result.strings_tables_translated += 1
                         result.total_strings += len(u_vals)
+                        result.tm_hits += tm_cnt
+                        result.neural_translated += len(u_vals) - tm_cnt
+                        rep_rows = [
+                            {
+                                "record_subrecord": f"STRINGS:{Path(fname).suffix.lstrip('.').upper()}",
+                                "form_id": f"0x{sid:08X}",
+                                "editor_id": fname,
+                                "source": str(b_res.get(v.strip(), {}).get("source", "TM")),
+                                "en_text": v.strip(),
+                                "uk_text": tr_table.get(sid, v).strip(),
+                            }
+                            for sid, v in st_table.items()
+                            if v and v.strip()
+                        ]
+                        exp = export_mod_translation_reports(
+                            rows=rep_rows,
+                            output_dir=out_backup_dir,
+                            mod_title=f"{mod_name} ({fname})",
+                            file_prefixes=[mod_name, fname],
+                            section=fname,
+                        )
+                        result.html_dictionary_path = exp["html_path"]
 
         idx_path = generate_master_index()
         if not result.html_dictionary_path:
@@ -768,6 +900,65 @@ def translate_mod_target(
 
     result.elapsed_sec = round(time.perf_counter() - t_start, 2)
     return result
+
+
+def _mod_folder_is_translatable(mod_dir: Path) -> bool:
+    """A mod folder is translatable if it ships a plugin, MCM translation file, or a BSA."""
+    try:
+        if any(p.is_file() and p.suffix.lower() in (".esp", ".esm", ".esl", ".bsa") for p in mod_dir.iterdir()):
+            return True
+        trans = mod_dir / "Interface" / "Translations"
+        return trans.is_dir() and any(trans.glob("*_english.txt"))
+    except OSError:
+        return False
+
+
+def translate_modlist(
+    mods_dir: Path,
+    mcm_title_mode: str = "keep_english",
+    strict_whitelist_mode: bool = True,
+    use_local_ollama: bool = False,
+    progress_cb: Optional[Callable[[str, float], None]] = None,
+) -> List[ModTranslationResult]:
+    """
+    Translate every mod folder inside a Mod Organizer 2 `mods/` directory (or any folder of mod folders).
+    Each mod is stored in translated_mods/<ModName>/ ; no unified patch is created here
+    (see core.patch_builder.build_unified_mo2_patch).
+    """
+    mods_dir = Path(mods_dir)
+    if not mods_dir.is_dir():
+        raise InvalidTargetError(f"Modlist folder does not exist: {mods_dir}")
+    candidates = sorted(
+        [d for d in mods_dir.iterdir() if d.is_dir() and _mod_folder_is_translatable(d)],
+        key=lambda p: p.name.lower(),
+    )
+    results: List[ModTranslationResult] = []
+    for i, mod_dir in enumerate(candidates):
+        base = 100.0 * i / max(1, len(candidates))
+        span = 100.0 / max(1, len(candidates))
+        if progress_cb:
+            progress_cb(f"[{i + 1}/{len(candidates)}] {mod_dir.name}", base)
+        req = ModTranslationRequest(
+            target_path=mod_dir,
+            mcm_title_mode=mcm_title_mode,
+            strict_whitelist_mode=strict_whitelist_mode,
+            use_local_ollama=use_local_ollama,
+        )
+        try:
+            results.append(
+                translate_mod_target(
+                    req,
+                    progress_cb=(lambda m, pct, b=base, s=span: progress_cb(m, b + s * pct / 100.0))
+                    if progress_cb
+                    else None,
+                )
+            )
+        except Exception as exc:  # one broken mod must not abort the whole modlist
+            if progress_cb:
+                progress_cb(f"[ERROR] {mod_dir.name}: {exc}", base)
+    if progress_cb:
+        progress_cb("Modlist translation completed.", 100.0)
+    return results
 
 
 def run_showcase_mod_translation() -> Dict[str, Any]:

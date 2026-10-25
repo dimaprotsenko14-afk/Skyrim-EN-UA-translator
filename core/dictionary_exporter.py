@@ -1,4 +1,4 @@
-"""
+﻿"""
 Single-file HTML dictionary exporter (core/dictionary_exporter.py).
 
 For every translated mod folder, produces STRICTLY ONE report file:
@@ -53,11 +53,11 @@ tr:hover td{background:#212532}code{font-family:'Cascadia Mono',Consolas,monospa
 .cp:hover{color:var(--gold);border-color:var(--gold)}.cp.done{color:var(--ok);border-color:var(--ok)}
 .bar{height:16px;background:#101218;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:8px 0}
 .st-COMPLETED{color:var(--ok)}.st-IN_PROGRESS{color:var(--warn)}.st-PENDING{color:var(--muted)}.st-FAILED{color:#ff6b6b}
-.wave-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:14px 0}
-.wave-card{background:#161922;border:1px solid var(--border);border-radius:8px;padding:12px 16px}
-.wave-card h4{margin:0 0 6px;color:var(--gold);font-size:13.5px}
-.wave-card .w-cnt{font-size:18px;font-weight:700;color:var(--text);margin-bottom:4px}
-.wave-card .w-sub{font-size:12px;color:var(--muted)}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:14px 0}
+.stat-card{background:#161922;border:1px solid var(--border);border-radius:8px;padding:12px 16px}
+.stat-card h4{margin:0 0 6px;color:var(--gold);font-size:13.5px}
+.stat-card .w-cnt{font-size:18px;font-weight:700;color:var(--text);margin-bottom:4px}
+.stat-card .w-sub{font-size:12px;color:var(--muted)}
 .w-badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;background:#2b3245;color:#bcd}
 """
 
@@ -157,43 +157,48 @@ def _render_mod_html(reg: Dict[str, Any], title: str) -> str:
 <script>{_JS}</script></body></html>"""
 
 
-def generate_master_index() -> Path:
-    """INDEX_DICTIONARY.html: links to every mod dictionary + wave completion stats + overall progress."""
+def _resource_type(section: str) -> str:
+    """Classify a dictionary section (plugin / MCM / string table file name) into a resource type."""
+    s = section.lower()
+    if s.endswith((".esp", ".esm", ".esl")):
+        return s.rsplit(".", 1)[1].upper()
+    if s.endswith(".json"):
+        return "MCM JSON"
+    if s.endswith(".txt") or "mcm" in s or "interface" in s:
+        return "MCM TXT"
+    if s.endswith(("strings", ".dlstrings", ".ilstrings")):
+        return "Strings"
+    return "ESP/ESM/ESL"
+
+
+def _local_tm_size() -> int:
+    """Number of translation pairs currently stored in the local data/skyrim_tm.db."""
+    import sqlite3
+
+    db_file = DATA_DIR / "skyrim_tm.db"
+    if not db_file.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(str(db_file))
+        try:
+            return int(conn.execute("SELECT COUNT(*) FROM translations;").fetchone()[0])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
+def generate_master_index(translated_dir: Optional[Path] = None) -> Path:
+    """
+    INDEX_DICTIONARY.html: links to every mod dictionary found in translated_mods/ with dynamic
+    statistics computed only from the mods that were actually translated by the user.
+    """
     from core.checkpoint_manager import CheckpointManager
 
-    TRANSLATED_MODS_DIR.mkdir(parents=True, exist_ok=True)
+    root = Path(translated_dir) if translated_dir else TRANSLATED_MODS_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    index_path = root / "INDEX_DICTIONARY.html"
     cp = CheckpointManager()
-
-    cat_map: Dict[str, Dict[str, Any]] = {}
-    wave_targets = {
-        "Wave 1": {"name": "Wave 1: TM Instant", "total_mods": 154, "total_strings": 2544, "done_mods": 0, "done_strings": 0},
-        "Wave 2": {"name": "Wave 2: Small & MCM", "total_mods": 435, "total_strings": 11693, "done_mods": 0, "done_strings": 0},
-        "Wave 3": {"name": "Wave 3: Medium Overhauls", "total_mods": 233, "total_strings": 77317, "done_mods": 0, "done_strings": 0},
-        "Wave 4": {"name": "Wave 4: Large Overhauls", "total_mods": 94, "total_strings": 532993, "done_mods": 0, "done_strings": 0},
-    }
-
-    def _cat_to_wave(cat_name: str) -> str:
-        if cat_name == "ALREADY_LOCALIZED_OR_TM":
-            return "Wave 1"
-        if cat_name == "TRANSLATABLE_SMALL":
-            return "Wave 2"
-        if cat_name == "TRANSLATABLE_MEDIUM":
-            return "Wave 3"
-        if cat_name == "TRANSLATABLE_LARGE":
-            return "Wave 4"
-        return "Wave 2"
-
-    if CATALOG_JSON.exists():
-        try:
-            cat = json.loads(CATALOG_JSON.read_text(encoding="utf-8"))
-            for m in cat.get("mods", []):
-                mname = m.get("mod_name")
-                if mname:
-                    c = m.get("category", "")
-                    w = _cat_to_wave(c)
-                    cat_map[mname] = {"category": c, "wave": w, "total_strings": m.get("total_strings", 0)}
-        except (OSError, ValueError):
-            pass
 
     mods: List[Dict[str, Any]] = []
     for reg_file in sorted(REGISTRY_DIR.glob("*.json")) if REGISTRY_DIR.exists() else []:
@@ -201,90 +206,83 @@ def generate_master_index() -> Path:
             reg = json.loads(reg_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        rows = [r for rws in reg["sections"].values() for r in rws]
         name = reg["mod_name"]
+        if not (root / name).is_dir():
+            continue  # only mods that really exist in the current translated_mods/ folder
+        rows = [r for rws in reg["sections"].values() for r in rws]
         changed = sum(1 for r in rows if r["en_text"].strip() != r["uk_text"].strip())
         link = f"{urllib.parse.quote(name)}/{urllib.parse.quote(_safe(name))}_dictionary.html"
         entry = cp.get(name) or {}
         st = entry.get("status", "COMPLETED")
-        c_info = cat_map.get(name, {})
-        wave_key = entry.get("wave") or c_info.get("wave") or "Wave 2"
-        if wave_key in wave_targets and st == "COMPLETED":
-            wave_targets[wave_key]["done_mods"] += 1
-            wave_targets[wave_key]["done_strings"] += len(rows)
-
+        res_types = sorted({_resource_type(s) for s in reg["sections"]})
         mods.append({
             "name": name,
-            "wave": wave_key,
             "rows": len(rows),
             "changed": changed,
             "tm": sum(1 for r in rows if r["source"].startswith("TM")),
             "sections": list(reg["sections"]),
+            "types": res_types,
             "link": link,
             "status": st,
-            "synced": entry.get("synced_to_mo2", False),
             "updated": reg.get("updated", ""),
         })
 
-    cat_total = sum(w["total_strings"] for w in wave_targets.values())
-    cat_mods = sum(w["total_mods"] for w in wave_targets.values())
-    done_rows = sum(m["rows"] for m in mods)
-    done_mods_cnt = sum(1 for m in mods if m["status"] == "COMPLETED")
+    mods_cnt = len(mods)
+    total_rows = sum(m["rows"] for m in mods)
+    tm_hits = sum(m["tm"] for m in mods)
+    tm_pct = 100.0 * tm_hits / max(total_rows, 1)
+    tm_size = _local_tm_size()
+    all_types = sorted({t for m in mods for t in m["types"]})
+    all_status = sorted({m["status"] for m in mods})
 
-    pct = 100.0 * done_rows / max(cat_total, 1)
-    mod_pct = 100.0 * done_mods_cnt / max(cat_mods, 1)
-
-    cards_html = []
-    for wk, wdata in wave_targets.items():
-        w_pct = 100.0 * wdata["done_mods"] / max(wdata["total_mods"], 1)
-        cards_html.append(
-            f"<div class='wave-card'><h4>{html.escape(wdata['name'])}</h4>"
-            f"<div class='w-cnt'>{wdata['done_mods']} / {wdata['total_mods']} модів ({w_pct:.1f}%)</div>"
-            f"<div class='bar'><div style='width:{min(w_pct, 100):.1f}%'></div></div>"
-            f"<div class='w-sub'>{wdata['done_strings']:,} / {wdata['total_strings']:,} рядків</div></div>"
-        )
-    cards_str = "".join(cards_html)
+    cards_html = (
+        f"<div class='stat-card'><h4>Перекладено модів</h4><div class='w-cnt'>{mods_cnt}</div></div>"
+        f"<div class='stat-card'><h4>Усього перекладених рядків</h4><div class='w-cnt'>{total_rows:,}</div></div>"
+        f"<div class='stat-card'><h4>Збігів із локальної бази TM</h4><div class='w-cnt'>{tm_hits:,} ({tm_pct:.1f}%)</div>"
+        f"<div class='bar'><div style='width:{min(tm_pct, 100):.1f}%'></div></div></div>"
+        f"<div class='stat-card'><h4>Розмір бази пам'яті (skyrim_tm.db)</h4><div class='w-cnt'>{tm_size:,} пар</div></div>"
+    )
 
     trs = "".join(
-        f"<tr data-wave='{html.escape(m['wave'])}'><td><span class='w-badge'>{html.escape(m['wave'])}</span> "
-        f"<a href='{m['link']}'>{html.escape(m['name'])}</a></td><td>{html.escape(', '.join(m['sections']))}</td>"
+        f"<tr data-type='{html.escape('|'.join(m['types']))}' data-status='{html.escape(m['status'])}'>"
+        f"<td><a href='{m['link']}'>{html.escape(m['name'])}</a></td>"
+        f"<td><span class='w-badge'>{html.escape(', '.join(m['types']))}</span></td>"
+        f"<td>{html.escape(', '.join(m['sections']))}</td>"
         f"<td>{m['rows']:,}</td><td>{m['changed']:,}</td><td>{m['tm']:,}</td>"
-        f"<td class='st-{m['status']}'>{m['status']}{' ✓MO2' if m['synced'] else ''}</td>"
+        f"<td class='st-{m['status']}'>{m['status']}</td>"
         f"<td>{html.escape(m['updated'][:19])}</td></tr>"
-        for m in sorted(mods, key=lambda x: (x["wave"], x["name"].lower()))
+        for m in sorted(mods, key=lambda x: x["name"].lower())
     )
+    type_opts = "".join(f"<option value='{html.escape(t)}'>{html.escape(t)}</option>" for t in all_types)
+    status_opts = "".join(f"<option value='{html.escape(s)}'>{html.escape(s)}</option>" for s in all_status)
 
     doc = f"""<!DOCTYPE html><html lang="uk"><head><meta charset="UTF-8"><title>Індекс словників перекладу (Skyrim SE/AE)</title>
 <style>{_CSS}</style></head><body><div class="header"><h1>Індекс словників перекладу (Skyrim SE/AE)</h1>
-<div class="stats"><span>Перекладено модів: <strong>{done_mods_cnt}</strong> / {cat_mods}</span>
-<span>Рядків у словниках: <strong>{done_rows:,}</strong> / {cat_total:,}</span></div>
-<div>Рядки: {pct:.1f}%<div class="bar"><div style="width:{min(pct, 100):.1f}%"></div></div></div>
-<div>Моди: {mod_pct:.1f}%<div class="bar"><div style="width:{min(mod_pct, 100):.1f}%"></div></div></div>
-<div class="wave-grid">{cards_str}</div>
+<div class="stat-grid">{cards_html}</div>
 <div class="controls"><input type="text" id="q" placeholder="Фільтр за назвою моду…" oninput="g()">
-<select id="wv" onchange="g()"><option value="ALL">Усі хвилі (Wave 1-4)</option>
-<option value="Wave 1">Wave 1: TM Instant (154)</option>
-<option value="Wave 2">Wave 2: Small & MCM (435)</option>
-<option value="Wave 3">Wave 3: Medium (233)</option>
-<option value="Wave 4">Wave 4: Large (94)</option></select>
+<select id="ty" onchange="g()"><option value="ALL">Усі типи ресурсів</option>{type_opts}</select>
+<select id="stt" onchange="g()"><option value="ALL">Усі статуси</option>{status_opts}</select>
 </div></div>
-<div class="wrap"><table><thead><tr><th>Мод & Хвиля</th><th>Файли</th><th>Записів</th><th>Змінено</th><th>З TM</th><th>Статус</th><th>Оновлено</th></tr></thead>
+<div class="wrap"><table><thead><tr><th>Мод</th><th>Тип ресурсу</th><th>Файли</th><th>Записів</th><th>Змінено</th><th>З TM</th><th>Статус</th><th>Оновлено</th></tr></thead>
 <tbody id="tb">{trs}</tbody></table></div>
 <script>
 function g(){{
   const q = document.getElementById('q').value.toLowerCase().trim();
-  const wv = document.getElementById('wv').value;
+  const ty = document.getElementById('ty').value;
+  const st = document.getElementById('stt').value;
   document.querySelectorAll('#tb tr').forEach(tr=>{{
-    const w = tr.dataset.wave || '';
-    const mw = (wv === 'ALL' || w === wv);
+    const t = (tr.dataset.type || '').split('|');
+    const s = tr.dataset.status || '';
+    const mt = (ty === 'ALL' || t.includes(ty));
+    const ms = (st === 'ALL' || s === st);
     const mq = (!q || tr.innerText.toLowerCase().includes(q));
-    tr.style.display = (mw && mq) ? '' : 'none';
+    tr.style.display = (mt && ms && mq) ? '' : 'none';
   }});
 }}
 </script>
 </body></html>"""
-    INDEX_PATH.write_text(doc, encoding="utf-8")
-    return INDEX_PATH
+    index_path.write_text(doc, encoding="utf-8")
+    return index_path
 
 
 def cleanup_legacy_reports(root: Path = TRANSLATED_MODS_DIR) -> Dict[str, int]:

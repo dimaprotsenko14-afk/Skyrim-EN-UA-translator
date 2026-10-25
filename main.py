@@ -32,6 +32,8 @@ from core.mod_translator import ModTranslationRequest, translate_mod_target
 from core.modpack_scanner import scan_all_modpack_mods
 from core.scanner import run_directory_audit
 from core.sseat_inspector import run_sseat_inspection
+from core.mod_translator import translate_modlist
+from core.patch_builder import PatchBuildRequest, build_unified_mo2_patch
 from core.tm_builder import TMBuildRequest, build_tm_from_reference
 from core.vanilla_deployer import (
     build_vanilla_uk_from_extracted_en,
@@ -125,6 +127,28 @@ def main() -> None:
         help="Path to downloaded Ukrainian reference mod folder (e.g. OPN/TPN from Nexus/Steam)",
     )
     parser.add_argument(
+        "--translate-modlist",
+        type=str,
+        default=None,
+        help="Translate every mod folder inside a Mod Organizer 2 mods/ directory into translated_mods/<ModName>/",
+    )
+    parser.add_argument(
+        "--build-patch",
+        action="store_true",
+        help="Build the unified [UA] Skyrim Translation Patch (translated mods + optional donor reference layer)",
+    )
+    parser.add_argument(
+        "--no-donor",
+        action="store_true",
+        help="With --build-patch: do not include the donor/reference translation as the base layer",
+    )
+    parser.add_argument(
+        "--donor",
+        type=str,
+        default=None,
+        help="Donor/reference translation folder for --build-patch (defaults to config reference_dir)",
+    )
+    parser.add_argument(
         "--reset-db",
         action="store_true",
         help="Recreate database from scratch during build-db",
@@ -168,10 +192,12 @@ def main() -> None:
 
     if args.target:
         cfg = load_config_model()
-        out_dir = Path(args.output) if args.output else get_output_patch_dir()
+        # Without --output the mod is stored in translated_mods/<ModName>/ ; with --output it is written to that patch folder.
+        out_dir = Path(args.output) if args.output else None
         req = ModTranslationRequest(
             target_path=Path(args.target),
             output_patch_dir=out_dir,
+            build_patch=out_dir is not None,
             mcm_title_mode=args.mcm_title_mode or cfg.mcm_title_mode,
             strict_whitelist_mode=cfg.strict_whitelist_mode,
             use_local_ollama=args.use_ollama or cfg.use_local_ollama,
@@ -185,6 +211,37 @@ def main() -> None:
         print(f"  * Output Patch Dir   : {res.output_patch_dir}")
         print(f"  * HTML Dictionary    : {res.html_dictionary_path}")
         print(f"  * Elapsed Time       : {res.elapsed_sec}s")
+        print("=" * 72)
+        return
+
+    if args.translate_modlist:
+        results = translate_modlist(
+            Path(args.translate_modlist),
+            mcm_title_mode=args.mcm_title_mode or load_config_model().mcm_title_mode,
+            use_local_ollama=args.use_ollama,
+            progress_cb=lambda msg, pct: print(f"[{pct:5.1f}%] {msg}"),
+        )
+        tot = sum(r.total_strings for r in results)
+        tm = sum(r.tm_hits for r in results)
+        print("=" * 72)
+        print(f"[DONE] Modlist translated: {len(results)} mods, {tot:,} strings (TM hits: {tm:,})")
+        print("=" * 72)
+        return
+
+    if args.build_patch:
+        res = build_unified_mo2_patch(
+            PatchBuildRequest(
+                output_patch_dir=Path(args.output) if args.output else None,
+                donor_dir=Path(args.donor) if args.donor else None,
+                include_donor=not args.no_donor,
+            ),
+            progress_cb=lambda msg, pct: print(f"[{pct:5.1f}%] {msg}"),
+        )
+        print("=" * 72)
+        print(f"[DONE] Unified patch: {res.patch_dir}")
+        print(f"  * Donor files : {res.donor_files:,}")
+        print(f"  * Mod files   : {res.mod_files:,} ({len(res.mods_merged)} mods)")
+        print(f"  * Total       : {res.total_files:,} {res.by_kind}")
         print("=" * 72)
         return
 
@@ -245,15 +302,15 @@ def main() -> None:
         return
 
     if args.build_db:
-        if args.en_source and args.uk_reference:
+        if args.uk_reference:
             req = TMBuildRequest(
-                en_source_path=Path(args.en_source),
+                en_source_path=Path(args.en_source) if args.en_source else None,
                 uk_reference_path=Path(args.uk_reference),
                 reset_db=args.reset_db,
             )
             print("=" * 72)
             print("[BUILD-DB] Building Translation Memory from Reference Mod...")
-            print(f"  * EN Source     : {req.en_source_path}")
+            print(f"  * EN Source     : {req.en_source_path or '(auto-detect game Data folder)'}")
             print(f"  * UK Reference  : {req.uk_reference_path}")
             res = build_tm_from_reference(
                 req, progress_callback=lambda msg, pct: print(f"[{pct:5.1f}%] {msg}")
@@ -263,6 +320,7 @@ def main() -> None:
             print(f"  * String Table Pairs : {res.strings_pairs_count:,}")
             print(f"  * Plugin Pairs       : {res.plugin_pairs_count:,}")
             print(f"  * MCM UI Pairs       : {res.mcm_pairs_count:,}")
+            print(f"  * Dictionary Pairs   : {res.dictionary_pairs_count:,}")
             print(f"  * Total TM Rows      : {res.total_tm_rows:,}")
             print(f"  * Glossary Terms     : {res.glossary_terms_count:,}")
             print(f"  * Database Path      : {res.db_path}")
@@ -270,8 +328,8 @@ def main() -> None:
             print(f"  * Elapsed Time       : {res.elapsed_sec}s")
             print("=" * 72)
             return
-        elif args.en_source or args.uk_reference:
-            print("[ERROR] Both --en-source and --uk-reference must be provided to build from reference.")
+        elif args.en_source:
+            print("[ERROR] --uk-reference (the downloaded Ukrainian reference mod) is required with --en-source.")
             return
 
         run_directory_audit(save_json=True)
